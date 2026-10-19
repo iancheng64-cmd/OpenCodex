@@ -1,0 +1,20 @@
+'use strict';
+const fs=require('fs'),path=require('path'),os=require('os');
+(async()=>{
+const root=path.join(os.homedir(),'Library/Application Support/OpenCodex');
+const {url}=JSON.parse(fs.readFileSync(path.join(root,'test-endpoint.json')));
+const threadId=Object.keys(JSON.parse(fs.readFileSync(path.join(root,'native-threads.json')))).at(-1);
+const ws=new WebSocket(url),pending=new Map();let id=0,doneResolve;const done=new Promise(r=>doneResolve=r);
+const timer=setTimeout(()=>{console.error('Stop test timeout');process.exit(1)},60000);
+ws.onmessage=e=>{const m=JSON.parse(e.data);if(pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(Error(m.error.message)):p.resolve(m.result);}if(m.method==='turn/completed'&&m.params.threadId===threadId)doneResolve(m.params.turn);};
+await new Promise((r,j)=>{ws.onopen=r;ws.onerror=j});
+const call=(method,params={})=>new Promise((resolve,reject)=>{const n=++id;pending.set(n,{resolve,reject});ws.send(JSON.stringify({id:n,method,params}));});
+await call('initialize',{clientInfo:{name:'opencodex-stop-qa',version:'0.4.1'}});
+const resumed=await call('thread/resume',{threadId});
+const turn=await call('turn/start',{threadId,input:[{type:'text',text:'這是停止按鈕驗收。請逐項列出 100 個純數學等式，不要使用任何工具。'}],effort:'low'});
+await new Promise(r=>setTimeout(r,1500));
+await call('turn/interrupt',{threadId,turnId:turn.turn.id});
+const completed=await done;clearTimeout(timer);
+const result={version:'0.4.1',passed:completed.status==='interrupted',at:new Date().toISOString(),threadId,resumed:resumed.thread.id===threadId,turnId:completed.id,status:completed.status};
+fs.writeFileSync(path.join(__dirname,'../evidence/stop-reconnect-test.json'),JSON.stringify(result,null,2));console.log(result);ws.close();if(completed.status!=='interrupted')process.exitCode=1;
+})().catch(e=>{console.error(e.message);process.exit(1)});

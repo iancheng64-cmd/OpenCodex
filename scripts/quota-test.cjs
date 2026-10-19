@@ -1,0 +1,27 @@
+const assert=require('node:assert/strict');
+const create=require('../src/quota.cjs');
+const {rateLimitSummary}=require('../vendor/agentbridge/dist-main/runtime-usage.js');
+const raw={rateLimits:{primary:{usedPercent:37,windowDurationMins:300,resetsAt:2000000000},secondary:{usedPercent:0,windowDurationMins:10080,resetsAt:2000100000}}};
+let source,now=1000,changed=0;
+const monitor=create({getSource:()=>source,normalize:rateLimitSummary,publish:()=>changed++,now:()=>now});
+const peer=(key,request)=>({key,label:key,rpc:{request}});
+const good=async method=>method==='account/read'?{account:{type:'chatgpt',email:'test@example.invalid',planType:'plus'}}:raw;
+(async()=>{
+ assert.equal(monitor.snapshot().status,'disconnected');monitor.reset();assert.equal(monitor.snapshot().status,'disconnected');
+ await monitor.refresh();assert.equal(monitor.snapshot().status,'disconnected');
+ source=peer('A',good);await monitor.refresh();
+ assert.equal(monitor.snapshot().quota.buckets[0].primary.remainingPercent,63);
+ assert.equal(monitor.snapshot().quota.buckets[0].secondary.remainingPercent,100);
+ now+=91000;assert.equal(monitor.snapshot().stale,true);
+ source=peer('A',async()=>{throw Error('offline')});await monitor.refresh();
+ assert.equal(monitor.snapshot().status,'unavailable');assert.equal(monitor.snapshot().account,null);assert.equal(monitor.snapshot().quota,null);
+ let resolve;const pending=new Promise(r=>resolve=r);
+ source=peer('slow',async m=>{await pending;return good(m)});const old=monitor.refresh();
+ source=peer('new',async m=>m==='account/read'?{account:{type:'apiKey'}}:{});
+ await monitor.refresh();resolve();await old;
+ assert.equal(monitor.snapshot().source,'new');assert.equal(monitor.snapshot().account.type,'apiKey');assert.equal(monitor.snapshot().status,'unavailable');
+ source=peer('unknown',async m=>m==='account/read'?{account:{type:'chatgpt'}}:{rateLimits:{primary:{windowDurationMins:300}}});
+ await monitor.refresh();assert.equal(monitor.snapshot().quota.buckets[0].primary.remainingPercent,null);
+ monitor.reset(null,'disconnected');assert.equal(monitor.snapshot().quota,null);
+ console.log(JSON.stringify({pass:true,cases:['remote percentages','staleness','account failure clears identity','peer switch ignores old replies','unknown percentage remains null','disconnect clears quota'],notifications:changed}));
+})().catch(e=>{console.error(e);process.exitCode=1;});

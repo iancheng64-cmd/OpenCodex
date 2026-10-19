@@ -1,0 +1,6 @@
+process.noAsar=true;
+const fs=require('fs'),path=require('path'),crypto=require('crypto');
+function archive(file){const fd=fs.openSync(file,'r'),b=Buffer.alloc(16);fs.readSync(fd,b,0,16,0);const h=Buffer.alloc(b.readUInt32LE(12));fs.readSync(fd,h,0,h.length,16);const root=JSON.parse(h),base=8+b.readUInt32LE(4);const entries={};function walk(n,p=''){for(const[k,v]of Object.entries(n.files||{})){const q=p?p+'/'+k:k;if(v.files)walk(v,q);else entries[q]=v;}}walk(root);
+return {entries,read(name){const e=entries[name];if(!e)throw Error('Missing '+name);if(e.link)return this.read(e.link);if(e.unpacked)return fs.readFileSync(file+'.unpacked/'+name);const v=Buffer.alloc(e.size);fs.readSync(fd,v,0,v.length,base+Number(e.offset));return v;},close(){fs.closeSync(fd);}};}
+module.exports={archive};
+if(require.main===module){const a=archive(process.argv[2]),dest=process.argv[3];fs.mkdirSync(dest,{recursive:true});fs.writeFileSync(path.join(dest,'archive-files.json'),JSON.stringify(Object.keys(a.entries),null,2));let n=0;for(const f of Object.keys(a.entries)){if(f==='package.json'||f==='LICENSE'||f.startsWith('.vite/build/')||f.startsWith('dist-main/')){const out=path.join(dest,f);fs.mkdirSync(path.dirname(out),{recursive:true});fs.writeFileSync(out,a.read(f));n++;}}console.log(JSON.stringify({files:Object.keys(a.entries).length,extracted:n,dest}));a.close();}

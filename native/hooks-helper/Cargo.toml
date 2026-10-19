@@ -1,0 +1,37 @@
+[package]
+name = "opencodex-hooks-helper"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+futures = "0.3"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+codex-hooks = { path = "../../research/codex-0.162.0-alpha.17.2/codex-rs/hooks" }
+codex-config = { path = "../../research/codex-0.162.0-alpha.17.2/codex-rs/config" }
+codex-file-system = { path = "../../research/codex-0.162.0-alpha.17.2/codex-rs/file-system" }
+codex-protocol = { path = "../../research/codex-0.162.0-alpha.17.2/codex-rs/protocol" }
+codex-utils-absolute-path = { path = "../../research/codex-0.162.0-alpha.17.2/codex-rs/utils/absolute-path" }
+codex-utils-path-uri = { path = "../../research/codex-0.162.0-alpha.17.2/codex-rs/utils/path-uri" }
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.release]
+strip = true
+lto = "thin"
+
+[patch.crates-io]
+crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "ed1cdab335221515706178d68495bba2aed1924f" }
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
+
+[patch."ssh://git@github.com/openai-oss-forks/tungstenite-rs.git"]
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }

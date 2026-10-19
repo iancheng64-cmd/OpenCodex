@@ -1,0 +1,21 @@
+'use strict';
+// Export a shareable summary without conversation text, account data or local paths.
+const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),assert=require('node:assert/strict');
+const root=path.resolve(__dirname,'..'),dir=path.join(root,'evidence');
+const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
+const report=JSON.parse(fs.readFileSync(path.join(dir,'native-mcp-gui-e2e.json'))),baseline=JSON.parse(fs.readFileSync(path.join(dir,'release-check-0.4.8.json')));
+const asar=path.join(root,'build/OpenCodex.app/Contents/Resources/app.asar'),digest=sha(fs.readFileSync(asar));
+assert.equal(baseline.passed,true);assert.equal(baseline.asarSHA256,digest);
+assert.equal(report.passed,true);assert.equal(report.phase,'widget-interaction-passed');assert.equal(report.turnStatus,'completed');
+assert(Date.parse(report.at)>=Date.parse(baseline.at));
+assert(fs.statSync(asar).mtimeMs<Date.parse(report.at),'Bundle was modified after GUI acceptance began');
+if(report.asarSHA256)assert.equal(report.asarSHA256,digest);
+assert(report.events.some(e=>e.params?.item?.type==='mcpToolCall'&&e.params.item.tool?.includes('show_counter')&&!e.params.item.error&&!e.params.item.result?.isError));
+assert.equal(JSON.parse(report.widgetBefore.result).structuredContent.count,0);
+assert.equal(JSON.parse(report.widgetAfter.result).structuredContent.count,1);
+assert.equal(report.widgetAfter.state,'操作成功');
+assert(report.widgetOperations.some(e=>e.method==='tools/call'&&e.tool==='increment'));
+assert(report.widgetOperations.some(e=>e.method==='result'&&e.tool==='increment'&&e.count===1));
+assert.equal(report.postTitleComposer?.busy,false);assert(report.postTitleComposer.ready&&report.postTitleComposer.connected&&report.postTitleComposer.editable);
+const summary={postTitleComposerReady:true,version:report.version,at:report.at,completedAt:report.completedAt,verifiedAt:new Date().toISOString(),passed:true,asarSHA256:digest,evidenceSHA256:sha(fs.readFileSync(path.join(dir,'native-mcp-gui-e2e.json'))),scope:'Owned local fixture: real GPT show_counter, native MCP Apps WebView rendering, post-turn button callback and result update',realModelToolCall:true,nativeWebView:true,postTurnCallback:true,countBefore:0,countAfter:1,limits:['This does not validate all third-party MCP Apps or all event-streaming paths']};
+fs.writeFileSync(path.join(dir,'native-mcp-gui-summary.json'),JSON.stringify(summary,null,2)+'\n');console.log(JSON.stringify(summary));

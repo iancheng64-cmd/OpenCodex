@@ -1,0 +1,18 @@
+'use strict';
+const assert=require('node:assert/strict');
+const {validateProfile}=require('../src/ssh-profiles.cjs');
+const cred=require('../vendor/agentbridge/dist-main/profile-credentials.js');
+const base={id:'test',name:'Test',host:'host.example',username:'u',port:22,authType:'password',runtimePlatform:'auto'};
+assert.equal(validateProfile({...base,networkMode:'relay',relayUrl:'https://relay.invalid'}).networkMode,'direct');
+assert.equal(validateProfile({...base,relayUrl:'https://relay.invalid'}).relayUrl,undefined);
+for(const value of [0,-1,65536,1.5,'bad'])assert.throws(()=>validateProfile({...base,port:value}));
+assert.throws(()=>validateProfile({...base,host:'bad\nhost'}));
+assert.throws(()=>validateProfile({...base,authType:'unknown'}));
+assert.throws(()=>validateProfile({...base,authType:'key',keyPath:'relative'}));
+const saved=cred.saveCredentialProfile({...base,savePassword:true,password:'test-only'},undefined,x=>'encrypted:'+x,true);
+assert.equal(cred.saveCredentialProfile({...base,savePassword:true},saved,x=>x,true).encryptedPassword,saved.encryptedPassword);
+assert.equal(cred.saveCredentialProfile({...base,host:'different',savePassword:true},saved,x=>x,true).encryptedPassword,undefined);
+assert.equal(cred.saveCredentialProfile({...base,savePassword:false},saved,x=>x,true).encryptedPassword,undefined);
+assert.equal(cred.publicProfile(saved).encryptedPassword,undefined);
+assert.equal(cred.publicProfile(saved).password,undefined);
+console.log('PASS: 15 SSH validation / credential isolation assertions');

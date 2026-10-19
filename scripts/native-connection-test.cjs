@@ -1,0 +1,59 @@
+'use strict';
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {connectionState,initializationFailure}=require('../src/native-connection.cjs');
+const tests=[],rpc={isClosed:false},id='test-mac-environment';
+const runtime={closed:false,rpc,executor:{isRunning:true,environmentId:id,registrations:new Map([[id,{rpc}]])},snapshot:{executorEnvironment:{environmentId:id}},mcp:{environmentId:id,name:'mac',url:'http://127.0.0.1/tool',token:'test-only'},toolHost:{status:()=>({ok:true,tools:['mac_test']})}};
+const state=()=>({mode:'ssh',sshAgent:'codex',connecting:false,...connectionState(runtime)});
+assert.equal(state().toolsReady,true);assert.equal(state().diagnostic,null);
+runtime.executor.isRunning=false;runtime.snapshot.diagnostic=initializationFailure('executor-start',Error('Timed out after 12000ms: token=do-not-display'));
+assert.equal(state().connected,true);assert.equal(state().executor,false);assert.equal(state().toolsReady,false);assert.equal(state().connectionStage,'executor-start');assert.match(state().diagnostic,/逾時/);assert(!JSON.stringify(state()).includes('do-not-display'));
+runtime.executor.isRunning=true;delete runtime.snapshot.diagnostic;runtime.executor.registrations.clear();
+assert.equal(state().toolsReady,false);assert.equal(state().connectionStage,'executor-register');
+runtime.executor.registrations.set(id,{rpc:{}});assert.equal(state().toolsReady,false);
+runtime.executor.registrations.set(id,{rpc});runtime.snapshot.executorEnvironment.environmentId='stale';
+assert.equal(state().toolsReady,false);runtime.snapshot.executorEnvironment.environmentId=id;
+tests.push('SSH remains connected for account reads while missing, stale or foreign executor registrations block submission');
+const healthyHost=runtime.toolHost;runtime.toolHost={status:()=>({ok:false,tools:['stale-tool']})};
+assert.equal(state().toolsReady,false);assert.equal(state().connectionStage,'tool-host');
+runtime.toolHost={status:()=>{throw Error('EACCES https://secret:password@private.invalid/?api_key=do-not-display')}};
+assert.doesNotThrow(state);assert.match(state().diagnostic,/權限不足/);
+runtime.toolHost=healthyHost;runtime.mcp.environmentId='foreign';
+assert.equal(state().toolsReady,false);runtime.mcp.environmentId=id;
+const mcp=runtime.mcp;runtime.mcp=undefined;assert.equal(state().toolsReady,false);runtime.mcp=mcp;
+runtime.openCodexWorkspaceFailed=true;assert.equal(state().connectionStage,'workspace');assert.equal(state().toolsReady,false);
+runtime.openCodexWorkspaceFailed=false;
+runtime.snapshot.diagnostic=initializationFailure('tool-host',Error('timeout'));
+assert.equal(state().toolsReady,true);assert.equal(state().diagnostic,null);
+delete runtime.snapshot.diagnostic;tests.push('dead or mismatched MCP host and failed workspace block submission; recovery clears stale diagnostics');
+for(const payload of ['Authorization: Bearer do-not-display','https://secret:password@private.invalid/?api_key=do-not-display','stderr do-not-display','\x1b[31m do-not-display']){
+ runtime.executor.isRunning=false;runtime.snapshot.diagnostic=payload;
+ assert(!JSON.stringify(state()).includes('do-not-display'));
+}
+runtime.executor.isRunning=true;delete runtime.snapshot.diagnostic;
+tests.push('public diagnostic exposes only failure category, never arbitrary output or credentials');
+let api;const events=new Map(),errorElement={textContent:''};
+const ipcRenderer={sendSync:()=>state(),on:(name,fn)=>events.set(name,fn),invoke:async()=>state()};
+vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../src/native-preload.cjs'),'utf8'),{
+ require:name=>{assert.equal(name,'electron');return {ipcRenderer,contextBridge:{exposeInMainWorld:(_name,value)=>{api=value}}}},
+ document:{readyState:'loading',getElementById:()=>errorElement},window:{addEventListener:()=>{}}
+});
+const seen=[];const unsubscribe=api.subscribe(value=>seen.push(value));assert.equal(api.canSubmit(),true);
+runtime.toolHost=undefined;const unavailable=state();events.get('opencodex:status')(null,unavailable);assert.equal(api.canSubmit(),false);
+errorElement.textContent=unavailable.diagnostic;runtime.toolHost=healthyHost;events.get('opencodex:status')(null,state());assert.equal(api.canSubmit(),true);assert.equal(errorElement.textContent,'');
+events.get('opencodex:status')(null,{...state(),connecting:true});assert.equal(api.canSubmit(),false);
+events.get('opencodex:status')(null,{...state(),toolsReady:undefined});assert.equal(api.canSubmit(),false);
+events.get('opencodex:status')(null,{...state(),mode:'official'});assert.equal(api.canSubmit(),false);
+events.get('opencodex:status')(null,{...state(),sshAgent:'claude',toolsReady:false,authentication:{status:'authenticated'}});assert.equal(api.canSubmit(),true);
+events.get('opencodex:status')(null,{...state(),sshAgent:'claude',authentication:{status:'required'}});assert.equal(api.canSubmit(),false);
+assert.deepEqual(seen,[true,false,true,false,false,false,true,false]);unsubscribe();
+tests.push('actual native preload publishes unavailable/recovered composer state, clears old error, preserves official and Claude routing');
+runtime.closed=true;assert.equal(state().connected,false);assert.equal(state().toolsReady,false);runtime.closed=false;rpc.isClosed=true;assert.equal(state().connected,false);rpc.isClosed=false;
+tests.push('transport closure removes readiness');
+const {initializationDiagnostics}=require('./runtime-patches.cjs');
+const vendor=fs.readFileSync(path.join(__dirname,'../vendor/agentbridge/dist-main/runtime-backend.js'),'utf8'),patched=initializationDiagnostics(vendor);
+assert.equal(initializationDiagnostics(patched),patched);new vm.Script(patched);
+for(const stage of ['executor-start','executor-register','tool-host'])assert(patched.includes('initializationFailure("'+stage+'", error)'));
+assert.throws(()=>initializationDiagnostics('unexpected runtime'));
+tests.push('patches all three real vendor initialization catches, is idempotent and refuses unknown sources');
+const report={version:'0.4.5',at:new Date().toISOString(),passed:true,tests};
+fs.writeFileSync(path.join(__dirname,'../evidence/native-connection-unit.json'),JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report));
