@@ -101,6 +101,44 @@ async function test(name,fn){await fn();tests.push(name);}
    const calls=[];await require('../src/native-review.cjs').detachedReview({threadId:'source',cwd:b,permissions:':workspace'},async(m,p)=>{calls.push([m,p]);return m==='thread/start'?{thread:{id:'review'}}:{reviewThreadId:'review'};});
    assert.deepEqual(calls[0][1],{cwd:b,permissions:':workspace'});assert.equal(calls[1][1].cwd,b);
   });
+  await test('empty persistent threads save native history before reloading invalidated permissions',async()=>{
+   const calls=[],rt={openCodexThreads:new Set(),rpc:{request:async(m,p)=>calls.push([m,p])}};
+   const params={threadId:'same-thread',excludeTurns:true};
+   const result=await workspace.resume(rt,params,{entry:{emptyHistory:true},check(){},readThread:async(r,p,empty)=>{
+    assert.equal(r,rt.rpc);assert.equal(empty,true);calls.push(['thread/read',p]);return {thread:{id:'same-thread',turns:[]}};
+   },request:async(m,p)=>{calls.push([m,p]);return {thread:{id:'same-thread'}};}});
+   assert.equal(result.thread.id,'same-thread');
+   assert.deepEqual(calls,[['thread/read',{threadId:'same-thread',includeTurns:true}],['thread/unsubscribe',{threadId:'same-thread'}],['thread/resume',params]]);
+  });
+  await test('admitted threads retain subscriptions and existing history is not read again',async()=>{
+   const calls=[],rt={openCodexThreads:new Set(['same-thread']),rpc:{request:async()=>{throw Error('unexpected unsubscribe')}}};
+   await workspace.resume(rt,{threadId:'same-thread'},{entry:{emptyHistory:false},check(){},readThread:async()=>{throw Error('unexpected history read')},request:async(m,p)=>{calls.push(m);return {thread:{id:p.threadId}};}});
+   assert.deepEqual(calls,['thread/resume']);
+  });
+  await test('cancelled reloads cannot proceed after persistence, unsubscribe or resume',async()=>{
+   for(const cancelAt of ['read','unsubscribe','resume']){
+    const calls=[];let cancelled=false;
+    const rt={openCodexThreads:new Set(),rpc:{request:async()=>{calls.push('unsubscribe');cancelled=cancelAt==='unsubscribe';}}};
+    await assert.rejects(workspace.resume(rt,{threadId:'same-thread'},{
+     entry:{emptyHistory:true},check(){if(cancelled)throw Error('cancelled');},
+     readThread:async()=>{calls.push('read');cancelled=cancelAt==='read';return {thread:{id:'same-thread'}};},
+     request:async()=>{calls.push('resume');cancelled=cancelAt==='resume';return {thread:{id:'same-thread'}};}
+    }),/cancelled/);
+    assert.deepEqual(calls,['read','unsubscribe','resume'].slice(0,['read','unsubscribe','resume'].indexOf(cancelAt)+1));
+   }
+  });
+  await test('reload rejects ephemeral, busy, mismatched history and unsubscribe failures',async()=>{
+   for(const failure of ['ephemeral','busy','foreign','read','unsubscribe']){
+    let resumes=0,unsubscribes=0;
+    const rt={run:failure==='busy'?{}:null,openCodexThreads:new Set(),rpc:{request:async()=>{unsubscribes++;throw Error('unsubscribe failed');}}};
+    await assert.rejects(workspace.resume(rt,{threadId:'same-thread'},{
+     entry:{emptyHistory:true,summary:{ephemeral:failure==='ephemeral'}},check(){},
+     readThread:async()=>{if(failure==='read')throw Error('read failed');return {thread:{id:failure==='foreign'?'foreign':'same-thread'}};},
+     request:async()=>{resumes++;}
+    }));
+    assert.equal(resumes,0);assert.equal(unsubscribes,failure==='unsubscribe'?1:0);
+   }
+  });
   await test('tool host changes writable root, default cwd and all project extension clients together',async()=>{
    const {LocalToolHost}=require('../build/OpenCodex.app/Contents/Resources/agentbridge/app/dist-main/local-tool-host.js');
    const host=Object.create(LocalToolHost.prototype),stopped=[];

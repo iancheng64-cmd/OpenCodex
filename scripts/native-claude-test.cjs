@@ -1,21 +1,41 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {NativeClaude}=require('../src/native-claude.cjs'),{ApprovalGrants}=require('../src/native-approvals.cjs');
-const {patchClaudeBackend}=require('./claude-patches.cjs');
+const {patchClaudeBackend,patchClaudeRuntime}=require('./claude-patches.cjs');
 const Ajv=require('../build/OpenCodex.app/Contents/Resources/agentbridge/app/node_modules/ajv');
 const ajv=new Ajv({strict:false,allErrors:true,formats:{int32:true,int64:true,uint16:true,uint32:true,uint64:true,uint:true}}),validators=new Map(),tests=[],fixtureRoots=new Set();
 function validate(name,value){if(!validators.has(name)){const schema=JSON.parse(fs.readFileSync(path.join(__dirname,'../build/native-protocol/v2',name+'.json')));validators.set(name,ajv.compile(schema));}const v=validators.get(name);assert(v(value),JSON.stringify(v.errors));}
 function setup(root=fs.mkdtempSync(path.join(os.tmpdir(),'opencodex-claude-unit-'))){
  fixtureRoots.add(root);
- const events=[],sent=[],calls=[],errors=[],settings={profileId:'profile-a',cwd:root,permissionMode:'project',fullAccess:false};
- const cli={id:'runtime-a',busy:false,status:()=>({runtimeVersion:'test',account:{authenticated:true,verified:true},models:[{id:'default',model:'default',displayName:'Claude',description:'test',isDefault:true,supportedReasoningEfforts:[]}]}),send:async input=>{sent.push(input);cli.busy=true;},refreshAccount:async()=>{}};
+ const events=[],sent=[],calls=[],errors=[],steered=[],settings={profileId:'profile-a',cwd:root,permissionMode:'project',fullAccess:false};
+ const cli={id:'runtime-a',busy:false,status:()=>({runtimeVersion:'test',account:{authenticated:true,verified:true},models:[{id:'default',model:'default',displayName:'Claude',description:'test',isDefault:true,supportedReasoningEfforts:[]}]}),send:async input=>{sent.push(input);cli.busy=true;},steer:content=>{steered.push(content);return {requestId:'runtime-a'};},refreshAccount:async()=>{}};
  const runtime={cli,host:{status:()=>({ok:true}),listTools:()=>[],entries:new Map()},cwd:root,network:{profileId:'profile-a',hostFingerprint:'SHA256:test'},hostKey:'host-a',hostName:'Test',pending:new Map(),permissionMode:'project',closed:false};
  const a=new NativeClaude({root,settings,saveSettings:()=>{},invoke:async(name,...args)=>{calls.push([name,...args]);if(name==='claude:permission')runtime.permissionMode=args[1];if(name==='claude:cancel'){cli.busy=false;a.event({type:'done',runtimeId:cli.id,requestId:args[1],status:'cancelled'});}},emit:m=>events.push(m),onState:()=>{},selectWorkspace:async(r,cwd)=>r.cwd=cwd,refreshTools:async()=>{},forwardRequest:()=>false,grants:new ApprovalGrants(path.join(root,'grants.json')),showApproval:async()=>({response:2}),onError:e=>errors.push(e.message)});
- a.attach(runtime,{});return {a,runtime,cli,root,settings,events,sent,calls,errors,finish:()=>{cli.busy=false;a.event({type:'done',runtimeId:cli.id,status:'completed'});},close:()=>a.close()};
+ a.attach(runtime,{});return {a,runtime,cli,root,settings,events,sent,steered,calls,errors,finish:()=>{cli.busy=false;a.event({type:'done',runtimeId:cli.id,status:'completed'});},close:()=>a.close()};
 }
 async function test(name,fn){await fn();tests.push({name,passed:true});console.log('PASS '+name);}
 (async()=>{
- await test('vendor patch is exact, idempotent and fails closed on a changed boundary',async()=>{const code=fs.readFileSync(path.join(__dirname,'../vendor/agentbridge/dist-main/claude-local-backend.js'),'utf8'),patched=patchClaudeBackend(code);assert.equal(patchClaudeBackend(patched),patched);assert.throws(()=>patchClaudeBackend(code.replace('const runtimes = new Map();','const other = new Map();')));});
+ await test('vendor patch is exact, idempotent and fails closed on a changed boundary',async()=>{const code=fs.readFileSync(path.join(__dirname,'../vendor/agentbridge/dist-main/claude-local-backend.js'),'utf8'),patched=patchClaudeBackend(code);assert.equal(patchClaudeBackend(patched),patched);assert.throws(()=>patchClaudeBackend(code.replace('const runtimes = new Map();','const other = new Map();')));
+  const runtime=fs.readFileSync(path.join(__dirname,'../vendor/agentbridge/dist-main/claude-local-runtime.js'),'utf8'),steerable=patchClaudeRuntime(runtime);assert.equal(patchClaudeRuntime(steerable),steerable);assert.match(steerable,/steer\(content\) \{/);assert.throws(()=>patchClaudeRuntime(runtime.replace('    async sendAndWait(input) {','    async sendAndWaitChanged(input) {')));});
+ await test('steering a running turn stays in the same Claude process and native turn',async()=>{
+  const f=setup();try{
+   const id=(await f.a.request('thread/start',{})).thread.id;
+   await assert.rejects(f.a.request('turn/steer',{threadId:id,input:[{type:'text',text:'太早'}]}),/no active turn to steer/);
+   const started=await f.a.request('turn/start',{threadId:id,input:[{type:'text',text:'開始',text_elements:[]}]});
+   await assert.rejects(f.a.request('turn/steer',{threadId:id,expectedTurnId:'other',input:[{type:'text',text:'x'}]}),/expected active turn id `other` but found `/);
+   const steered=await f.a.request('turn/steer',{threadId:id,expectedTurnId:started.turn.id,clientUserMessageId:'c2',input:[{type:'text',text:'補充說明',text_elements:[]}],additionalContext:'背景'});
+   validate('TurnSteerResponse',steered);assert.equal(steered.turnId,started.turn.id);
+   assert.equal(f.steered.length,1);assert.deepEqual(f.steered[0].map(c=>c.text),['補充說明','背景']);assert.equal(f.sent.length,1,'no second Claude turn is started');
+   assert.deepEqual(f.events.filter(m=>m.method==='item/completed'&&m.params.item.type==='userMessage').map(m=>m.params.item.content[0].text),['開始','補充說明']);
+   f.finish();
+   const history=await f.a.request('thread/read',{threadId:id,includeTurns:true});validate('ThreadReadResponse',history);
+   assert.equal(history.thread.turns.length,1);assert.deepEqual(history.thread.turns[0].items.filter(i=>i.type==='userMessage').map(i=>i.clientId),[null,'c2']);
+   await assert.rejects(f.a.request('turn/steer',{threadId:id,input:[{type:'text',text:'晚了'}]}),/no active turn to steer/);
+   await f.a.request('review/start',{threadId:id,target:{type:'uncommittedChanges'}});
+   await assert.rejects(f.a.request('turn/steer',{threadId:id,input:[{type:'text',text:'審查中'}]}),/cannot steer a review turn/);
+   assert.equal(f.steered.length,1);f.finish();
+  }finally{f.close();}
+ });
  await test('real native protocol schemas accept model, thread and streaming tool results',async()=>{
   const f=setup();try{
    validate('ModelListResponse',await f.a.request('model/list'));
@@ -57,6 +77,9 @@ async function test(name,fn){await fn();tests.push({name,passed:true});console.l
    assert.equal(f.a.state().authentication.status,'required');
    await assert.rejects(f.a.request('turn/start',{threadId:id,input:[{type:'text',text:'must not send'}]}),/登入/);assert.equal(f.sent.length,0);assert.equal(f.a.busy,false);
    f.cli.status=()=>({...original(),account:{authenticated:false,verified:false}});assert.equal(f.a.state().authentication.status,'unverified');
+   assert.equal(f.a.state().quota.status,'auth-unverified');
+   f.cli.status=()=>({...original(),account:{authenticated:false,verified:false,authProblem:'credential-unavailable',error:'鑰匙圈拒絕存取'}});assert.equal(f.a.state().authentication.status,'blocked');assert.equal(f.a.state().quota.status,'auth-blocked');
+   await assert.rejects(f.a.request('turn/start',{threadId:id,input:[{type:'text',text:'must not send'}]}),/鑰匙圈拒絕存取/);assert.equal(f.sent.length,0);
    f.cli.refreshAccount=async()=>{f.cli.status=original;};await f.a.refreshAccount();assert.equal(f.a.state().authentication.status,'authenticated');
   }finally{f.close();}
  });

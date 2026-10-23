@@ -1,10 +1,15 @@
 'use strict';
 const profiles={':read-only':'ask',':workspace':'project',':danger-full-access':'full'};
+const {profileFor}=require('./native-permissions-runtime.cjs');
+const guardian=require('./native-guardian-runtime.cjs');
+function profileId(mode){return profileFor(mode)||Object.keys(profiles).find(id=>profiles[id]===mode);}
 function selectedMode(params={}){
- if(params.approvalsReviewer&&params.approvalsReviewer!=='user')throw Error('SSH 模式目前由使用者審批；請選擇使用者審批模式。');
+ if(params.approvalsReviewer!=null)guardian.reviewer(params.approvalsReviewer);
  if(params.permissions!=null){
-  if(!Object.hasOwn(profiles,params.permissions))throw Error('SSH 模式不支援此自訂權限設定檔；請選擇內建權限。');
-  return profiles[params.permissions];
+  if(Object.hasOwn(profiles,params.permissions))return profiles[params.permissions];
+  const mode='custom:'+params.permissions;
+  if(typeof params.permissions!=='string')throw Error('無效的自訂權限設定檔。');
+  profileFor(mode);return mode;
  }
  const value=params.sandboxPolicy?.type||params.sandbox;
  if(value==null)return null;
@@ -37,8 +42,12 @@ async function localApproval({event,runtime,respond,show,isPending,grants,getSco
 }
 function resolveMode(params,remembered,settings){
  const requested=selectedMode(params)||remembered||settings.permissionMode||'project';
- if(!['ask','project','full'].includes(requested))throw Error('無效的操作權限。');
+ profileFor(requested);
  return {requested,effective:settings.fullAccess===true?'full':requested};
+}
+function resolveSelection(params,remembered,settings){
+ return {...resolveMode(params,remembered?.permissionMode,settings),
+  reviewer:guardian.reviewer(params.approvalsReviewer??remembered?.approvalsReviewer??settings.approvalsReviewer)};
 }
 async function setFullAccess({enabled,settings,busy,apply,save}){
  if(typeof enabled!=='boolean')throw Error('無效的最高權限設定。');
@@ -54,22 +63,39 @@ async function setFullAccess({enabled,settings,busy,apply,save}){
 // read-only sandbox isolates its own computer; it is not the Mac user's choice.
 // Keep the requested mode here: fullAccess is a separate executor override and
 // must not overwrite the choice that is restored when that override is disabled.
-function localSnapshot(snapshot,selection,cwd){
+function localSnapshot(snapshot,selection,cwd,verified){
  if(!snapshot||typeof snapshot!=='object'||Array.isArray(snapshot))return snapshot;
- if(snapshot.threadSettings)return {...snapshot,threadSettings:localSnapshot(snapshot.threadSettings,selection,cwd)};
+ // The peer reports its own working directory; the renderer must only ever see the Mac project.
+ if(typeof snapshot.cwd==='string'&&typeof cwd==='string'&&cwd.startsWith('/')&&snapshot.cwd!==cwd)snapshot={...snapshot,cwd};
+ if(snapshot.threadSettings)return {...snapshot,threadSettings:localSnapshot(snapshot.threadSettings,selection,cwd,verified)};
  const hasSandbox=Object.hasOwn(snapshot,'sandbox'),hasPolicy=Object.hasOwn(snapshot,'sandboxPolicy');
  if(!hasSandbox&&!hasPolicy)return snapshot;
  const mode=typeof selection==='string'?selection:selection?.requested;
- const id=Object.keys(profiles).find(key=>profiles[key]===mode);
- if(!id)throw Error('無效的操作權限。');
+ const reviewer=guardian.reviewer(typeof selection==='string'?undefined:selection?.reviewer);
+ const custom=profileFor(mode),id=profileId(mode);
+ if(custom){
+  // Highest access is an explicit executor override. Keep the requested ID so
+  // the renderer does not overwrite the profile restored when it is disabled.
+  if(selection?.effective==='full'){
+   const result=localSnapshot(snapshot,{requested:'full',reviewer},cwd);
+   result.activePermissionProfile={id,extends:null};return result;
+  }
+  if(verified?.cwd!==cwd||verified?.activePermissionProfile?.id!==custom||!verified?.sandbox)
+   throw Error('缺少此 Mac 專案已驗證的自訂權限，請重新開啟對話。');
+  const result={...snapshot,runtimeWorkspaceRoots:[cwd],approvalPolicy:reviewer==='auto_review'?'on-request':verified.approvalPolicy,
+   approvalsReviewer:reviewer,activePermissionProfile:structuredClone(verified.activePermissionProfile)};
+  if(hasSandbox)result.sandbox=structuredClone(verified.sandbox);
+  if(hasPolicy)result.sandboxPolicy=structuredClone(verified.sandbox);
+  return result;
+ }
  // Use the locally selected executor root, including when restoring old caches.
  // The native permission picker iterates writableRoots even for inactive modes.
  const roots=typeof cwd==='string'&&cwd.startsWith('/')&&!cwd.includes('\0')?[cwd]:[];
  const sandbox={type:{ask:'readOnly',project:'workspaceWrite',full:'dangerFullAccess'}[mode],
   ...(mode==='project'?{writableRoots:[...roots],networkAccess:false,excludeTmpdirEnvVar:false,excludeSlashTmp:false}:{})};
  // Never copy peer writable roots or a remote custom profile into a Mac snapshot.
- const result={...snapshot,runtimeWorkspaceRoots:[...roots],approvalPolicy:{ask:'untrusted',project:'on-request',full:'never'}[mode],
-  approvalsReviewer:'user',activePermissionProfile:{id,extends:null}};
+ const result={...snapshot,runtimeWorkspaceRoots:[...roots],approvalPolicy:mode!=='full'&&reviewer==='auto_review'?'on-request':{ask:'untrusted',project:'on-request',full:'never'}[mode],
+  approvalsReviewer:reviewer,activePermissionProfile:{id,extends:null}};
  if(hasSandbox)result.sandbox={...sandbox};
  if(hasPolicy)result.sandboxPolicy={...sandbox};
  return result;
@@ -91,4 +117,4 @@ async function appApproval({call,current,fullAccess,grants,getScope,show,onChang
  }catch(error){if(controller.signal.aborted)return false;throw error;}
  finally{clearInterval(monitor);call.signal?.removeEventListener('abort',abort);}
 }
-module.exports={selectedMode,localApproval,resolveMode,setFullAccess,localSnapshot,appApproval};
+module.exports={profileId,selectedMode,localApproval,resolveMode,resolveSelection,setFullAccess,localSnapshot,appApproval};

@@ -8,11 +8,11 @@ const pause=ms=>new Promise(r=>setTimeout(r,ms));
  ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.id){const p=pending.get(m.id);if(!p)return;clearTimeout(p.timer);pending.delete(m.id);m.error?p.reject(Error(m.error.message)):p.resolve(m.result);}};
  const call=(method,params={})=>new Promise((resolve,reject)=>{const id=++seq,timer=setTimeout(()=>{pending.delete(id);reject(Error('CDP timeout: '+method))},8000);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params}));});
  const evaluate=async expression=>{const r=await call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)throw Error(r.exceptionDetails.exception?.description||r.exceptionDetails.text);return r.result.value;};
- const click=async selector=>{const r=await evaluate('(()=>{const e=document.querySelector('+JSON.stringify(selector)+');if(!e)throw Error("Missing element");e.scrollIntoView({block:"nearest"});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()');await call('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...r});await call('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...r});await pause(350);};
+ const click=async selector=>{console.log(JSON.stringify({click:selector,at:new Date().toISOString()}));const r=await evaluate('(()=>{const e=document.querySelector('+JSON.stringify(selector)+');if(!e)throw Error("Missing element");e.scrollIntoView({block:"nearest"});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()');await call('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...r});await call('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...r});await pause(350);};
  const capture=async name=>{const r=await call('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(__dirname,'../evidence/'+name+'.png'),Buffer.from(r.data,'base64'));};
  const state=()=>evaluate('window.openCodexRuntime.status()');
  const wait=async(predicate,timeout=30000)=>{const end=Date.now()+timeout;while(Date.now()<end){if(await predicate())return;await pause(500)}throw Error('UI state timed out');};
- const results={at:new Date().toISOString(),version:'0.4.8'};
+ const results={at:new Date().toISOString(),version:'0.4.10'};
  try{
   const s=await state();assert.equal(s.mode,'ssh');assert.equal(s.connected,false);assert.equal(s.connecting,false);assert.equal(s.agentBridgeAppLoaded,false);
   await wait(()=>evaluate('!!document.querySelector("aside #opencodex-ssh")'));

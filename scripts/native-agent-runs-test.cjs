@@ -124,6 +124,12 @@ function reviewSetup(){
   await x.manager.cancel('root','root-turn');await assert.rejects(()=>x.manager.resolveHook(args,{threadId:'review'}));x.manager.close();
   const y=reviewSetup();y.threads.get('review').parentThreadId='peer';await assert.rejects(()=>y.manager.resolveHook(args,{threadId:'review'}));y.manager.close();
  });
+ await test('a remote Mac engine review may adopt the declared Mac environment cwd but no other path',async()=>{
+  const x=reviewSetup();x.threads.get('root').cwd='/Users/remote-home';
+  assert.equal(await x.manager.resolve(x.reviewMeta),x.root,'review in the declared Mac environment is accepted');x.manager.close();
+  const y=reviewSetup();y.threads.get('root').cwd='/Users/remote-home';y.threads.get('review').cwd='/Users/elsewhere';
+  await assert.rejects(()=>y.manager.resolve(y.reviewMeta),/Unverified review transcript \(cwd\)/);y.manager.close();
+ });
  await test('native review binds its internal identity to the verified outer turn and scoped approval',async()=>{
   const x=reviewSetup();const [a,b]=await Promise.all([x.manager.resolve(x.reviewMeta),x.manager.resolve(x.reviewMeta)]);
   assert.equal(a,x.root);assert.equal(a,b);assert.equal(x.manager.registry.records.size,1);assert.deepEqual(x.history,[]);
@@ -212,6 +218,6 @@ function reviewSetup(){
    assert.equal((await invoke(a,'mac_process_status',{id:one.id})).state,'cancelled');assert.equal((await invoke(b,'mac_process_status',{id:two.id})).state,'running');
   }finally{core.cancel();}
  });
- const report={at:new Date().toISOString(),version:'0.4.8',passed:true,checks,scope:'coordinator, scoped approvals, actual process cancellation, plugin owner isolation; not model or GUI E2E'};
+ const report={at:new Date().toISOString(),version:'0.4.9',passed:true,checks,scope:'coordinator, scoped approvals, actual process cancellation, plugin owner isolation; not model or GUI E2E'};
  fs.writeFileSync(path.resolve(__dirname,'../evidence/native-agent-runs-test.json'),JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report));
 })().catch(e=>{console.error(e);process.exitCode=1;});

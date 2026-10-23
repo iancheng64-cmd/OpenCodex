@@ -56,7 +56,8 @@ const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){if(e.code==='ESR
 const lines=()=>fs.existsSync(log)?fs.readFileSync(log,'utf8').trim().split('\n').filter(Boolean).map(JSON.parse):[];
 async function check(name,fn){try{const detail=await fn();report.checks.push({name,passed:true,...(detail?{detail}: {})});process.stdout.write('PASS '+name+'\n');}catch(e){report.checks.push({name,passed:false,error:e.stack});throw e;}}
 async function nextMcp(c,start){return until(()=>c.notifications.slice(start).find(m=>m.method==='hooks/mcp'),'MCP callback');}
-async function pids(){return until(()=>fs.existsSync(pidFile)&&JSON.parse(fs.readFileSync(pidFile,'utf8')),'hook children');}
+// The fixture writes this file while the check already polls; a half-written file is not a failure.
+async function pids(){return until(()=>{if(!fs.existsSync(pidFile))return null;try{return JSON.parse(fs.readFileSync(pidFile,'utf8'));}catch{return null;}},'hook children');}
 
 (async()=>{
  let c=new Client,inventory=await c.init();

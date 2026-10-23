@@ -8,7 +8,7 @@ toolchain_root="$project_root/build/hooks-toolchain/$rust_version"
 archive_root="$project_root/build/hooks-toolchain/downloads"
 [ "$(uname -m)" = arm64 ] || { echo 'This helper build currently targets Apple Silicon.' >&2; exit 1; }
 mkdir -p "$archive_root" "$toolchain_root"
-for component in rustc rust-std cargo; do
+for component in rustc rust-std cargo rustfmt clippy; do
   archive="$component-$rust_version-$rust_target.tar.xz"
   archive_path="$archive_root/$archive"
   curl --fail --silent --show-error --location --max-time 30 "https://static.rust-lang.org/dist/$archive.sha256" -o "$archive_path.sha256"

@@ -52,6 +52,8 @@ def package():
  # The release gate verifies every packed/unpacked file and block digest independently.
  engine_source=json.loads((root/'evidence/hooks-engine-source.json').read_text())
  assert sha(root/engine_source['archive'])==engine_source['sha256']
+ helper_source=json.loads((root/'evidence/hooks-helper-source.json').read_text())
+ assert sha(root/helper_source['archive'])==helper_source['sha256']
  hooks=json.loads((root/'evidence/native-hooks-product-e2e.json').read_text())
  assert hooks['passed'] and hooks['asarSHA256']==bundle_hash
  if storage.process_uses(source): raise SystemExit('Development App is running; close it before packaging.')
@@ -89,6 +91,8 @@ def package():
    if p.is_file() and (p.suffix=='.rs' or p.name in ('Cargo.toml','Cargo.lock')):
     z.write(p,'OpenCodex/'+p.relative_to(root).as_posix())
   z.write(root/engine_source['archive'],'OpenCodex/'+engine_source['archive'])
+  z.write(root/helper_source['archive'],'OpenCodex/'+helper_source['archive'])
+  z.write(root/'evidence/hooks-helper-source.json','OpenCodex/evidence/hooks-helper-source.json')
   for name in ('README.md','THIRD-PARTY-AGENTBRIDGE-LICENSE'): z.write(root/name,'OpenCodex/'+name)
   for name in (*tests.keys(),f'release-{version}.json','hooks-engine-source.json','native-hooks-product-e2e.json','windows-hooks-engine-crlf-deploy.json','windows-hooks-migration-compatibility.json','native-mcp-gui-summary.json','native-hooks-audit-20261017.md','native-hooks-relay-probe.json','native-empty-thread-probe.json','native-pages.json','native-official-auth-status.json','native-connection-unit.json','native-connection-live.json'):
    z.write(root/'evidence'/name,'OpenCodex/evidence/'+name)

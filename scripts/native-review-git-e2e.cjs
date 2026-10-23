@@ -2,7 +2,7 @@
 const fs=require('fs'),path=require('path'),assert=require('assert/strict'),crypto=require('crypto'),cp=require('child_process');
 const {cdp,rpc,wait}=require('./qa-client.cjs');
 (async()=>{
- const report={version:'0.4.8',at:new Date().toISOString(),target:'uncommittedChanges',delivery:'detached'};
+ const report={version:'0.4.10',at:new Date().toISOString(),target:'uncommittedChanges',delivery:'detached'};
  const fixture=fs.realpathSync(fs.mkdtempSync(path.join(__dirname,'../evidence/review-git-qa-')));
  const file=path.join(fixture,'total.cjs'),digest=x=>crypto.createHash('sha256').update(x).digest('hex');
  report.fixture=fixture;report.asarSha256=digest(fs.readFileSync(path.join(__dirname,'../build/OpenCodex.app/Contents/Resources/app.asar')));
@@ -63,7 +63,7 @@ const {cdp,rpc,wait}=require('./qa-client.cjs');
   if(active)try{await r.call('turn/interrupt',active,10000)}catch{}
   clearTimeout(watchdog);c.close();r.close();
   report.completedAt=new Date().toISOString();
-  fs.writeFileSync(path.join(__dirname,'../evidence/native-review-git-e2e-0.4.8.json'),JSON.stringify(report,null,2));
+  fs.writeFileSync(path.join(__dirname,'../evidence/native-review-git-e2e-0.4.10.json'),JSON.stringify(report,null,2));
   console.log(JSON.stringify({passed:report.passed,error:report.error,status:report.status,tools:report.tools?.map(t=>({tool:t.tool,status:t.status})),review:report.review,sourceUnchanged:report.sourceUnchanged,fixtureUnchanged:report.fixtureUnchanged}));
  }
-})().catch(e=>{console.error(e.stack);process.exit(1)});
+})().catch(e=>{console.error(e.stack);process.exit(1)}).finally(()=>process.exit(process.exitCode||0));

@@ -1,11 +1,12 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
 const {NativeHooksMcp}=require('../src/native-hooks-mcp.cjs');
-function fixture(){
+const permissionOptions={binary:'/verified/permission-engine',env:{SCOPE:'permissions'},AppServerRpc:class VerifiedRpc{}};
+function fixture(runtimeOverrides={}){
  const calls=[],requests=[];
  class Tools{
   constructor(options){this.options=options;this.threadId='local';this.resets=0;}
-  async ready(){}
+  async ready(){if(this.options.validate)assert.equal(await this.options.validate(),true);}
   async inventory(){return [{name:'fixture',runtimeStatus:'connected',tools:{probe:{}}}];}
   async operation(method,params,signal){calls.push({method,params,signal});return {content:[{type:'text',text:'one'},{type:'image',data:'ignored'},{type:'text',text:'two'}]};}
   reset(){this.resets++;}
@@ -13,7 +14,7 @@ function fixture(){
  }
  const run={threadId:'child',turnId:'turn',rootThreadId:'root',parentThreadId:'root',openCodex:true};
  const owner={run,threadId:'child',sessionId:'root',turnId:'turn'};
- const active={owner,authorized:()=>true},runtime={id:'runtime'};
+ const active={owner,authorized:()=>true},runtime={id:'runtime',...runtimeOverrides};
  const mcp=new NativeHooksMcp({record:{plan:{cwd:'/mac/project'}},runtime,Tools,onRequest:(m,r,c)=>{requests.push({m,r,c});return true;}});
  const call={threadId:'child',server:'fixture',tool:'probe',arguments:{value:1},metadata:{threadId:'child',sessionId:'forged','x-codex-turn-metadata':'forged'}};
  return {mcp,active,run,call,calls,requests,runtime};
@@ -69,6 +70,45 @@ test('owner expiry during inventory blocks dispatch',async()=>{
  const f=fixture();f.mcp.tools.inventory=async()=>{f.active.authorized=()=>false;return [{name:'fixture',runtimeStatus:'connected',tools:{probe:{}}}];};
  await assert.rejects(f.mcp.call(f.call,undefined,f.active),/owner ended/);assert.equal(f.calls.length,0);f.mcp.close();
 });
+
+test('custom Hook host requires and retains the verified profile',async()=>{
+ let valid=true,checks=0;
+ const permission={options:permissionOptions,profile:'audit',valid:()=>valid,validate:async()=>{checks++;return valid;}};
+ const f=fixture({permissionMode:'custom:audit',openCodexPermissions:permission});
+ assert.equal(f.mcp.tools.options.permissionProfile,'audit');
+ assert.equal(f.mcp.tools.options.binary,permissionOptions.binary);
+ assert.equal(f.mcp.tools.options.env,permissionOptions.env);
+ assert.equal(f.mcp.tools.options.AppServerRpc,permissionOptions.AppServerRpc);
+ assert.throws(()=>fixture({permissionMode:'custom:audit',openCodexPermissions:{profile:'audit',valid:()=>true}}),/引擎未就緒/);
+ await f.mcp.call(f.call,undefined,f.active);assert(checks>0);
+ valid=false;
+ await assert.rejects(f.mcp.call(f.call,undefined,f.active),/owner ended/);
+ assert.equal(f.calls.length,1);f.mcp.close();
+ assert.throws(()=>fixture({permissionMode:'custom:audit'}),/未就緒/);
+ assert.throws(()=>fixture({permissionMode:'custom:dev',openCodexPermissions:permission}),/未就緒/);
+ assert.throws(()=>fixture({permissionMode:'full',openCodexPermissions:permission}),/未就緒/);
+});
+test('profile replacement and built-in transitions revoke previous Hook authority',async()=>{
+ for(const update of [runtime=>runtime.permissionMode='full',runtime=>runtime.openCodexPermissions={}]) {
+  const permission={options:permissionOptions,profile:'dev',valid:()=>true,validate:async()=>true};
+  const f=fixture({permissionMode:'custom:dev',openCodexPermissions:permission});
+  f.mcp.tools.operation=async()=>{
+   update(f.runtime);
+   assert.equal(f.mcp.tools.options.onRequest({id:1,params:{threadId:'local'}},{},f.mcp.tools),false);
+   return {content:[{type:'text',text:'stale'}]};
+  };
+  await assert.rejects(f.mcp.call(f.call,undefined,f.active),/owner ended/);f.mcp.close();
+ }
+ const f=fixture();f.runtime.permissionMode='custom:audit';
+ await assert.rejects(f.mcp.call(f.call,undefined,f.active),/owner ended/);assert.equal(f.calls.length,0);f.mcp.close();
+});
+test('edited permission configuration blocks Hook dispatch before tool execution',async()=>{
+ const permission={options:permissionOptions,profile:'dev',valid:()=>true,validate:async()=>{throw Error('configuration changed');}};
+ const f=fixture({permissionMode:'custom:dev',openCodexPermissions:permission});
+ await assert.rejects(f.mcp.call(f.call,undefined,f.active),/configuration changed/);
+ assert.equal(f.calls.length,0);assert.equal(f.mcp.active,null);f.mcp.close();
+});
+
 test('serializes one Hook session and discards results after cancel or close',async()=>{
  for(const method of ['cancel','close']){
   const f=fixture();let finish;

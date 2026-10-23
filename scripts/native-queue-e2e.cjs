@@ -5,7 +5,7 @@ const {rpc,wait,cdp}=require('./qa-client.cjs');
  const fixture=fs.realpathSync(fs.mkdtempSync(path.join(__dirname,'../evidence/queue-qa-')));
  const marker='QUEUE-FILE-'+crypto.randomUUID(),shellMarker='QUEUE-SHELL-'+crypto.randomUUID();
  fs.writeFileSync(path.join(fixture,'marker.txt'),marker);
- const report={version:'0.4.8',at:new Date().toISOString(),fixture,asarSha256:crypto.createHash('sha256').update(fs.readFileSync(path.join(__dirname,'../build/OpenCodex.app/Contents/Resources/app.asar'))).digest('hex')};
+ const report={version:'0.4.10',at:new Date().toISOString(),fixture,asarSha256:crypto.createHash('sha256').update(fs.readFileSync(path.join(__dirname,'../build/OpenCodex.app/Contents/Resources/app.asar'))).digest('hex')};
  const c=await cdp(),r=await rpc();let threadId,active;
  const watchdog=setTimeout(()=>{console.error('Native queue watchdog expired');process.exit(1)},360000);
  try{
@@ -51,6 +51,6 @@ const {rpc,wait,cdp}=require('./qa-client.cjs');
  finally{
   if(active)try{await r.call('turn/interrupt',active,10000)}catch{}
   clearTimeout(watchdog);c.close();r.close();report.completedAt=new Date().toISOString();
-  fs.writeFileSync(path.join(__dirname,'../evidence/native-queue-e2e-0.4.8.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
+  fs.writeFileSync(path.join(__dirname,'../evidence/native-queue-e2e-0.4.10.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
  }
-})().catch(e=>{console.error(e.stack);process.exit(1)});
+})().catch(e=>{console.error(e.stack);process.exit(1)}).finally(()=>process.exit(process.exitCode||0));

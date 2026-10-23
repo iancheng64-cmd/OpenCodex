@@ -41,12 +41,14 @@ const seen=[];const unsubscribe=api.subscribe(value=>seen.push(value));assert.eq
 runtime.toolHost=undefined;const unavailable=state();events.get('opencodex:status')(null,unavailable);assert.equal(api.canSubmit(),false);
 errorElement.textContent=unavailable.diagnostic;runtime.toolHost=healthyHost;events.get('opencodex:status')(null,state());assert.equal(api.canSubmit(),true);assert.equal(errorElement.textContent,'');
 events.get('opencodex:status')(null,{...state(),connecting:true});assert.equal(api.canSubmit(),false);
+events.get('opencodex:status')(null,{...state(),connecting:true,peerConnecting:true});assert.equal(api.canSubmit(),true);
 events.get('opencodex:status')(null,{...state(),toolsReady:undefined});assert.equal(api.canSubmit(),false);
 events.get('opencodex:status')(null,{...state(),mode:'official'});assert.equal(api.canSubmit(),false);
 events.get('opencodex:status')(null,{...state(),sshAgent:'claude',toolsReady:false,authentication:{status:'authenticated'}});assert.equal(api.canSubmit(),true);
 events.get('opencodex:status')(null,{...state(),sshAgent:'claude',authentication:{status:'required'}});assert.equal(api.canSubmit(),false);
-assert.deepEqual(seen,[true,false,true,false,false,false,true,false]);unsubscribe();
+assert.deepEqual(seen,[true,false,true,false,true,false,false,true,false]);unsubscribe();
 tests.push('actual native preload publishes unavailable/recovered composer state, clears old error, preserves official and Claude routing');
+tests.push('a collaborator peer connection keeps the main composer enabled');
 runtime.closed=true;assert.equal(state().connected,false);assert.equal(state().toolsReady,false);runtime.closed=false;rpc.isClosed=true;assert.equal(state().connected,false);rpc.isClosed=false;
 tests.push('transport closure removes readiness');
 const {initializationDiagnostics}=require('./runtime-patches.cjs');

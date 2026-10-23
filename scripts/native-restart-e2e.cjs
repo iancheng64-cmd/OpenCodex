@@ -5,7 +5,7 @@
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 const {cdp,rpc}=require('./qa-client.cjs');
 const evidence=path.resolve(__dirname,'../evidence'),output=path.join(evidence,'native-restart-e2e.json');
-const report={version:'0.4.8',at:new Date().toISOString(),passed:false,tests:[],scope:'offline persisted artifacts after caller-controlled app restart; native JSON-RPC and read-only runtime status, not renderer interaction'};
+const report={version:'0.4.10',at:new Date().toISOString(),passed:false,tests:[],scope:'offline persisted artifacts after caller-controlled app restart; native JSON-RPC and read-only runtime status, not renderer interaction'};
 const save=()=>fs.writeFileSync(output,JSON.stringify(report,null,2),{mode:0o600});
 save();
 (async()=>{
@@ -165,4 +165,4 @@ save();
   report.passed=true;
  }catch(error){report.error=error.stack||String(error);process.exitCode=1;}
  finally{clearTimeout(watchdog);client?.close();desktop?.close();save();console.log(JSON.stringify(report));}
-})().catch(error=>{report.passed=false;report.error=error.stack||String(error);save();console.error(report.error);process.exitCode=1;});
+})().catch(error=>{report.passed=false;report.error=error.stack||String(error);save();console.error(report.error);process.exitCode=1;}).finally(()=>process.exit(process.exitCode||0));

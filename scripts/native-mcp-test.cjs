@@ -5,7 +5,7 @@ const {MacExtensionClient}=require('../vendor/agentbridge/dist-main/mac-extensio
 const vm=require('node:vm'),{createRequire}=require('node:module');
 function fixtureHostClass(resourcesPath){
  const filename=path.resolve(__dirname,'../vendor/agentbridge/dist-main/local-tool-host.js'),nativeRequire=createRequire(filename),module={exports:{}};
- const source=fs.readFileSync(filename,'utf8'),before='{ category: "extension", available: () => client.running, tool: { ...original, name,';
+ const source=require('./subagent-patches.cjs').host(fs.readFileSync(filename,'utf8')),before='{ category: "extension", available: () => client.running, tool: { ...original, name,';
  assert.equal(source.split(before).length,2,'same unique extension owner patch as the production build');
  const patched=source.replace(before,'{ category: "extension", extensionId: spec.id, available: () => client.running, tool: { ...original, name,');
  const helper=path.join(resourcesPath,'app.asar','opencodex','native-mcp.cjs');
@@ -124,6 +124,40 @@ const deferred=()=>{let resolve;return {promise:new Promise(r=>resolve=r),resolv
   const pending4=bridge.call(params);await new Promise(r=>setImmediate(r));generation++;completion.resolve({content:[{type:'text',text:'stale'}]});
   await assert.rejects(pending4,/owner changed/);assert.equal(invoked,1);assert.equal(active.size,0);
  });
+ await test('native resource and app calls require an explicit leased authority after owner and tool approval',async()=>{
+  const {withAppAuthority,scopedApp}=require('../src/native-app-context.cjs');
+  const runtime={},nativeId='opencodex-native:leased',name=bridgeToolName(nativeId,'show');
+  let reads=0,calls=0,closed=0,approve=true,owner=true;
+  const inside=()=>{const lease=scopedApp(runtime);assert(lease?.valid());lease.own({close(){closed++;}});return lease;};
+  const client={running:true,resource:async()=>{inside();reads++;return {contents:[{uri,text:'native'}]};}};
+  const entry={extensionId:nativeId,category:'extension',tool:{name},available:()=>true,invoke:async()=>{inside();calls++;return {content:[{type:'text',text:'native'}]};}};
+  const bridge=new NativeMcpBridge({getClients:()=>new Map([[nativeId,client]]),getEntries:()=>new Map([[name,entry]]),authorizeResource:()=>owner,authorizeTool:()=>approve});
+  const projected=namespaceUri(nativeId,uri),params={tool:'show',_meta:{'opencodex/resourceUri':projected}};
+  await assert.rejects(bridge.read(projected),/explicit native approval context/);
+  await assert.rejects(bridge.call(params),/explicit native approval context/);
+  bridge.withNativeContext=({signal},action)=>withAppAuthority(runtime,{current:()=>owner,signal},action);
+  assert.equal((await bridge.read(projected)).contents[0].text,'native');
+  assert.equal((await bridge.call(params)).content[0].text,'native');
+  assert.equal(reads,1);assert.equal(calls,1);assert.equal(closed,2);assert.equal(scopedApp(runtime),null);
+  approve=false;await assert.rejects(bridge.call(params),/tool permission denied/);assert.equal(calls,1);
+  owner=false;await assert.rejects(bridge.read(projected),/permission denied/);assert.equal(reads,1);
+ });
+ await test('native app revocation cancels owned work without adopting a completed model turn',async()=>{
+  const {withAppAuthority,scopedApp}=require('../src/native-app-context.cjs');
+  const runtime={run:null};let current=true,closed=0;
+  const gate=deferred();
+  const pending=withAppAuthority(runtime,{current:()=>current},async()=>{
+   const lease=scopedApp(runtime);lease.own({close(){closed++;gate.resolve();}});
+   assert.throws(()=>scopedApp({}),/工作區/);
+   await gate.promise;return 'stale';
+  });
+  current=false;
+  // Keep a referenced deadline: authority monitoring intentionally uses unref().
+  let deadline;const timed=new Promise((_,reject)=>{deadline=setTimeout(()=>reject(Error('authority revocation did not close work')),2000);});
+  try{await assert.rejects(Promise.race([pending,timed]),/失效/);}finally{clearTimeout(deadline);}
+  assert.equal(closed,1);assert.equal(runtime.run,null);
+  await assert.rejects(withAppAuthority(runtime,{current:()=>{throw Error('revoked');}},()=>{throw Error('must not run');}),/失效/);
+ });
  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'opencodex-mcp-')),clients=new Map();
  try{
   const fixture=path.join(temp,'fixture.cjs');
@@ -213,6 +247,6 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    }finally{for(const client of host.extensionClients.values())await client.stop();}
   });
  }finally{for(const client of clients.values())await client.stop();fs.rmSync(temp,{recursive:true,force:true});}
- const report={version:'0.4.3',at:new Date().toISOString(),passed:true,tests,scope:'Unit regressions, pinned native renderer catalog/query/read functions and actual LocalToolHost with two owned Mac stdio MCP servers: resource routing and authorized after-turn extension app actions. No GUI rendering or remote model claim. Pinned renderer event streams remain codex_apps-only; native tool app actions require a separate native approval context.'};
+ const report={version:'0.4.3',at:new Date().toISOString(),passed:true,tests,scope:'Unit regressions, pinned native renderer catalog/query/read functions and actual LocalToolHost with two owned Mac stdio MCP servers: resource routing and authorized after-turn extension app actions. No GUI rendering or remote model claim. Pinned renderer event streams remain codex_apps-only; native tool resources and app actions require an explicit, revocable native approval context.'};
  fs.mkdirSync(path.join(__dirname,'../evidence'),{recursive:true});fs.writeFileSync(path.join(__dirname,'../evidence/native-mcp-test.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report,null,2));
 })().catch(error=>{console.error(error);process.exitCode=1;});

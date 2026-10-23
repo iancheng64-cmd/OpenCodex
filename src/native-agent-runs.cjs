@@ -2,6 +2,8 @@
 const {randomUUID}=require('node:crypto');
 const {NativeSubagents}=require('./native-subagents.cjs');
 const {withRun,scopedRun,turnMetadata}=require('./native-run-context.cjs');
+const guardianRuntime=require('./native-guardian-runtime.cjs');
+const {NativeGuardian}=require('./native-guardian.cjs');
 // Enabled only for the tested 0.160 v2 protocol. A receipt records root checks;
 // child authorization is based on config inheritance plus live thread/read.
 const verifiedConfigs=new WeakSet();
@@ -20,12 +22,17 @@ function receiptFor(runtime,threadId,config){
  if(!verifiedConfigs.has(config))throw Error('Subagent role configuration was not verified');
  if(config.mcp_servers?.[runtime.mcp.name]?.environment_id!==runtime.executor.environmentId)throw Error('Unbound Mac MCP configuration');
  for(const [name,value]of Object.entries(config.mcp_servers||{}))if(name!==runtime.mcp.name&&value.enabled!==false)throw Error('Peer MCP configuration is enabled');
- return Object.freeze({version:'0.160.0',rootThreadId:threadId,inventoryVerified:true,v2ConfigVerified:true});
+ const permission=runtime.openCodexPermissionReceipts?.get(threadId);
+ if(runtime.permissionMode?.startsWith('custom:')&&(!permission||permission.entry!==runtime.openCodexPermissions))throw Error('Missing verified custom permission configuration');
+ const guardian=guardianRuntime.receiptFor(runtime,threadId);
+ return Object.freeze({version:'0.160.0',rootThreadId:threadId,inventoryVerified:true,v2ConfigVerified:true,permission,guardian});
 }
 class NativeAgentRuns{
  constructor(runtime,deps,run,receipt){
   if(!receipt||receipt.rootThreadId!==run.threadId)throw Error('Missing verified root configuration');
   Object.assign(this,{runtime,deps,root:run,receipt});this.pending=new Map();this.discovering=new Map();this.ended=new Set();this.closed=false;this.stopRoot=false;
+  if(guardianRuntime.effective(runtime)==='auto_review'&&!receipt.guardian)throw Error('缺少 Guardian 對話授權。');
+  if(receipt.guardian)this.guardian=new NativeGuardian({sessionId:run.threadId,server:runtime.mcp.name,current:()=>this.current(),active:active=>this.isActive(active)});
   this.registry=new NativeSubagents({runtimeId:runtime.id,profileId:runtime.snapshot.profileId,environmentId:runtime.executor.environmentId,cwd:runtime.localCwd,mcpName:runtime.mcp.name,owner:runtime.toolHost,approvalPolicy:runtime.permissionMode==='full'?'never':'untrusted',sandbox:{type:runtime.permissionMode==='full'?'dangerFullAccess':'readOnly'},workspaceRoots:[runtime.localCwd]});
   const host=runtime.toolHost;
   host.openCodexCurrentRun=()=>scopedRun(runtime);
@@ -41,7 +48,14 @@ class NativeAgentRuns{
   };
   host.openCodexWithRun=(active,work)=>withRun(runtime,active,work);
  }
- current(){return !this.closed&&!this.stopRoot&&!this.runtime.closed&&!this.root.cancelled&&this.runtime.run===this.root;}
+ current(){
+  const r=this.runtime,p=this.receipt.permission;
+  const policy=!r.openCodexPermissionChanging&&!r.openCodexPermissionFailed&&(!r.permissionMode?.startsWith('custom:')||
+   (p&&p.entry===r.openCodexPermissions&&p.profile===r.permissionMode.slice(7)&&p.entry.valid()&&p.host===r.toolHost&&p.endpoint===r.toolHost.server&&p.rpc===r.rpc&&p.cwd===r.localCwd&&r.openCodexPermissionReceipts?.get(this.root.threadId)===p));
+  const guardian=this.receipt.guardian;
+  const review=guardian?guardianRuntime.current(r,guardian)&&r.openCodexGuardianReceipts?.get(this.root.threadId)===guardian:guardianRuntime.effective(r)!=='auto_review';
+  return policy&&review&&!this.closed&&!this.stopRoot&&!r.closed&&!this.root.cancelled&&r.run===this.root;
+ }
  isActive(run){const record=this.registry.records.get(run?.threadId);return this.current()&&record?.run===run&&this.registry.live(record)&&record.admitted&&record.phase==='active';}
  emit(run,event){this.deps.emit('runtime:event',{runtimeId:this.runtime.id,requestId:run.requestId,threadId:run.threadId,turnId:run.turnId,...event});}
  async ensure(threadId,turnId,ancestors=new Set()){
@@ -63,6 +77,8 @@ class NativeAgentRuns{
     if(!this.current())throw Error('Root turn ended');
     this.registry.registerConfiguredRoot(this.root,thread,this.receipt);
     this.rootTranscriptCwd=thread.cwd;
+    // The workspace lease holds this Mac cwd for the whole root turn.
+    this.rootEnvironmentCwd=this.runtime.localCwd;
    })();
    await this.initializing;
   }
@@ -125,6 +141,12 @@ class NativeAgentRuns{
   if(!this.root.nativeReview||value.thread_source!=='subagent'||value.subagent_kind!=='review'||value.codex_version!=='0.160.0'||value.parent_thread_id!==this.root.threadId||value.thread_id===this.root.threadId||value.turn_id!==this.reviewTurnId)throw Error('Unverified review owner');
   return this.reviewThreadOwner(value.thread_id,value.turn_id,signal);
  }
+ // A review sub-agent keeps the root transcript cwd, or adopts the Mac environment
+ // the root turn declared; a remote Mac engine can resolve that path natively.
+ reviewCwd(cwd){
+  const declared=[this.rootTranscriptCwd,this.rootEnvironmentCwd].filter(v=>typeof v==='string'&&v);
+  return typeof this.rootTranscriptCwd==='string'&&!!this.rootTranscriptCwd&&declared.includes(cwd);
+ }
  async reviewThreadOwner(threadId,turnId,signal){
   if(!this.root.nativeReview||typeof threadId!=='string'||threadId===this.root.threadId||turnId!==this.reviewTurnId)throw Error('Unverified review owner');
   const value={thread_id:threadId,turn_id:turnId};
@@ -134,7 +156,9 @@ class NativeAgentRuns{
   if(!this.reviewThreadId){
    const {thread}=await this.runtime.rpc.request('thread/read',{threadId:value.thread_id,includeTurns:true},10000);
    const turn=thread?.turns?.at(-1);
-   if(thread?.id!==value.thread_id||thread.parentThreadId!==root.threadId||thread.source?.subAgent!=='review'||thread.cliVersion!=='0.160.0'||typeof this.rootTranscriptCwd!=='string'||!this.rootTranscriptCwd||thread.cwd!==this.rootTranscriptCwd||turn?.id!==value.turn_id||turn.completedAt!=null)throw Error('Unverified review transcript');
+   // Name only the failed constant checks; values may contain remote paths.
+   const failed=[thread?.id!==value.thread_id&&'id',thread?.parentThreadId!==root.threadId&&'parent',thread?.source?.subAgent!=='review'&&'source',thread?.cliVersion!=='0.160.0'&&'version',!this.reviewCwd(thread?.cwd)&&'cwd',turn?.id!==value.turn_id&&'turn',turn?.completedAt!=null&&'completed'].filter(Boolean);
+   if(failed.length)throw Error('Unverified review transcript ('+failed.join(',')+')');
    if(this.reviewThreadId&&this.reviewThreadId!==value.thread_id)throw Error('Review identity changed');
    this.reviewThreadId=value.thread_id;
   }
@@ -194,6 +218,13 @@ class NativeAgentRuns{
  async authorize(call){
   const run=scopedRun(this.runtime);
   if(!this.isActive(run)||call.signal?.aborted)return false;
+  if(this.guardian){
+   // resolve() has already verified the internal review actor's ancestry.
+   const identity=this.root.nativeReview&&this.reviewThreadId?
+    {threadId:this.reviewThreadId,turnId:this.reviewTurnId}:undefined;
+   const eventIdentity=identity?{threadId:this.root.threadId,turnId:this.root.turnId}:undefined;
+   return this.guardian.authorize(run,call,identity,eventIdentity);
+  }
   const mode=this.runtime.permissionMode;
   if(call.category==='agent-bridge'||mode==='full'||(mode==='project'&&call.category==='filesystem-read'))return true;
   const id=randomUUID();
@@ -219,6 +250,7 @@ class NativeAgentRuns{
   return true;
  }
  notification(message){
+  this.guardian?.notification(message);
   const p=message.params||{},turnId=p.turn?.id||p.turnId;
   if(message.method==='turn/started'&&this.root.nativeReview&&p.threadId===this.root.threadId&&this.runtime.run===this.root&&!this.runtime.closed&&!this.reviewTurnId)this.reviewTurnId=turnId;
   if(message.method==='turn/started'&&p.threadId!==this.root.threadId){
@@ -250,6 +282,8 @@ class NativeAgentRuns{
   }catch{}
  }
  cleanup(run){
+  this.guardian?.cancel(run.threadId,run.turnId);
+  if(run===this.root&&this.reviewThreadId)this.guardian?.cancel(this.reviewThreadId,this.reviewTurnId);
   this.runtime.toolHost?.cancelRun(run);this.deps.cancelNativeRun?.(this.runtime,run);this.runtime.openCodexCloseRun?.(run);
   for(const [id,pending]of this.runtime.requests)if(pending.requestId===run.requestId){clearTimeout(pending.timer);this.runtime.requests.delete(id);pending.localResolve?.(false);this.emit(run,{type:'requestClosed',approvalId:id});}
  }
@@ -278,6 +312,7 @@ class NativeAgentRuns{
  }
  close(){
   if(this.closed)return;this.closed=true;this.stopRoot=true;
+  this.guardian?.close();
   const targets=this.registry.cancel(this.root.threadId);
   if(!this.registry.records.has(this.root.threadId)&&!this.root.cancelled){
    this.root.cancelled=true;this.cleanup(this.root);
@@ -287,4 +322,4 @@ class NativeAgentRuns{
   // Leave this closed gate in place until a new verified turn owns the host.
  }
 }
-module.exports={NativeAgentRuns,receiptFor,configureSubagents};
+module.exports={NativeAgentRuns,receiptFor,configureSubagents,guardianRuntime};

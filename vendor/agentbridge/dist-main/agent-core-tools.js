@@ -286,7 +286,8 @@ class AgentCoreTools {
             if (args.runtime !== undefined && !['shell', 'node'].includes(String(args.runtime)))
                 throw new Error('Invalid command runtime');
             const node = args.runtime === 'node';
-            const child = (0, node_child_process_1.spawn)(node ? process.execPath : '/bin/zsh', node ? ['-e', command] : ['-lc', command], { cwd, env: node ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env, detached: true, stdio: 'pipe' });
+            const launch = this.config.spawnProcess || node_child_process_1.spawn;
+            const child = launch(node ? process.execPath : '/bin/zsh', node ? ['-e', command] : ['-lc', command], { cwd, env: node ? { ...process.env, ELECTRON_RUN_AS_NODE: '1' } : process.env, detached: true, stdio: 'pipe' });
             const id = (0, node_crypto_1.randomUUID)();
             const job = { id, child, pid: child.pid, state: 'running', output: '', start: 0, total: 0, exitCode: null, timer: setTimeout(() => this.kill(job, 'timeout'), timeoutMs), createdAt: Date.now(), truncated: false };
             this.jobs.set(id, job);
@@ -311,6 +312,10 @@ class AgentCoreTools {
             }
             catch { } append(decoders[0].end()); append(decoders[1].end()); clearTimeout(job.timer); job.exitCode = code; if (job.state === 'running')
                 job.state = code === 0 ? 'completed' : 'failed'; });
+            if (this.config.onProcessStarted) {
+                try { await this.config.onProcessStarted(job); check(signal); }
+                catch (error) { this.kill(job, 'cancelled'); throw error; }
+            }
             return { id, pid: job.pid, state: job.state, cwd, executionLocation: 'local' };
         });
         const get = (value) => { const job = this.jobs.get(text(value, 80)); if (!job)

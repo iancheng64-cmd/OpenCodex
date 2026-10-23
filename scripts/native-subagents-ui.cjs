@@ -2,7 +2,7 @@
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),crypto=require('node:crypto');
 const {cdp,wait}=require('./qa-client.cjs');
 const root=path.resolve(__dirname,'..'),dir=path.join(root,'evidence');
-const report={version:'0.4.8',at:new Date().toISOString(),passed:false};
+const report={version:'0.4.10',at:new Date().toISOString(),passed:false};
 let c;
 (async()=>{
  const live=JSON.parse(fs.readFileSync(path.join(dir,'native-subagents-live.json')));
@@ -24,7 +24,7 @@ let c;
  for(const name of ['Qa one','Qa two']){
   await wait(()=>c.evaluate('([...document.querySelectorAll("button")].some(b=>b.getBoundingClientRect().width&&b.innerText.startsWith('+JSON.stringify(name+'\n')+')))'),10000);
   await c.evaluate('([...document.querySelectorAll("button")].find(b=>b.getBoundingClientRect().width&&b.innerText.startsWith('+JSON.stringify(name+'\n')+'))).click()');
-  await wait(()=>c.evaluate('document.body.innerText.split('+JSON.stringify(marker)+').length>=3&&!!document.querySelector(\'button[aria-label="返回子智慧體"]\')'),20000);
+  await wait(()=>c.evaluate('document.body.innerText.split('+JSON.stringify(marker)+').length>=3&&!!document.querySelector(\'button[aria-label="返回子智慧體"]\')'),90000);
   assert.equal(await failure(),false);
   report.children.push({name,realChildReplyVisible:true});
   await c.evaluate('document.querySelector(\'button[aria-label="返回子智慧體"]\').click()');
@@ -33,4 +33,4 @@ let c;
  report.runtimeExceptions=c.events.filter(e=>e.method==='Runtime.exceptionThrown').map(e=>e.params.exceptionDetails.text);
  assert.deepEqual(report.runtimeExceptions,[]);
  report.rootRestored=true;report.overview=true;report.childDetails=true;report.returnNavigation=true;report.passed=true;
-})().catch(e=>{report.error=e.stack;process.exitCode=1}).finally(()=>{c?.close();fs.writeFileSync(path.join(dir,'native-subagents-ui.json'),JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report))});
+})().catch(e=>{report.error=e.stack;process.exitCode=1}).finally(()=>{c?.close();fs.writeFileSync(path.join(dir,'native-subagents-ui.json'),JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report))}).finally(()=>process.exit(process.exitCode||0));

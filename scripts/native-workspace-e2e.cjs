@@ -2,7 +2,7 @@
 const fs=require('fs'),path=require('path'),assert=require('assert/strict'),crypto=require('crypto'),cp=require('child_process');
 const {cdp,rpc,wait}=require('./qa-client.cjs');
 (async()=>{
- const report={version:'0.4.8',at:new Date().toISOString(),tests:[]},fixture=fs.mkdtempSync(path.join(__dirname,'../evidence/workspace-qa-'));
+ const report={version:'0.4.10',at:new Date().toISOString(),tests:[]},fixture=fs.mkdtempSync(path.join(__dirname,'../evidence/workspace-qa-'));
  const a=fs.realpathSync(fixture),b=path.join(a,'second'),repo=path.join(a,'repo');fs.mkdirSync(b);fs.mkdirSync(repo);
  const markers={a:'PROJECT-A-'+crypto.randomUUID(),b:'PROJECT-B-'+crypto.randomUUID()};
  fs.writeFileSync(path.join(a,'project-marker.txt'),markers.a);fs.writeFileSync(path.join(b,'project-marker.txt'),markers.b);
@@ -29,7 +29,7 @@ const {cdp,rpc,wait}=require('./qa-client.cjs');
   assert(wt.worktreeWorkspaceRoot.startsWith(a+'/'));assert.equal(fs.readFileSync(path.join(wt.worktreeWorkspaceRoot,'fixture.txt'),'utf8'),'base\n');
   fs.writeFileSync(path.join(wt.worktreeWorkspaceRoot,'project-marker.txt'),'WORKTREE-'+crypto.randomUUID());
   report.worktree=wt;report.tests.push('native Git init, status, diff, branch creation and worktree creation verified against Mac filesystem');
-  await r.call('initialize',{clientInfo:{name:'workspace-qa',version:'0.4.8'}});
+  await r.call('initialize',{clientInfo:{name:'workspace-qa',version:'0.4.10'}});
   async function start(cwd){const t=(await r.call('thread/start',{cwd,permissions:':workspace'})).thread;assert.equal(t.cwd,cwd);return t.id;}
   async function shell(threadId,cwd){
    const from=r.events.length;await r.call('thread/shellCommand',{threadId,command:'/bin/pwd; /bin/cat project-marker.txt'});
@@ -52,9 +52,10 @@ const {cdp,rpc,wait}=require('./qa-client.cjs');
   const tw=await start(wt.worktreeWorkspaceRoot);report.threadWorktree=tw;report.worktreeShell=await shell(tw,wt.worktreeWorkspaceRoot);
   const owned=await c.worker('set-worktree-owner-thread',{worktree:wt.worktreeGitRoot,conversationId:tw});assert(owned.success);
   assert.equal((await c.worker('worktree-owner',{cwd:wt.worktreeWorkspaceRoot})).ownerThreadId,tw);
-  const list=await r.call('thread/list',{cwd:a,limit:100});assert(list.data.some(t=>t.id===ta));assert(!list.data.some(t=>t.id===tb||t.id===tw));assert(list.data.every(t=>t.cwd===a));
+  // Match the native renderer: legacy rollout scanning is a separate, slower API path.
+  const list=await r.call('thread/list',{cwd:a,limit:100,useStateDbOnly:true});assert(list.data.some(t=>t.id===ta));assert(!list.data.some(t=>t.id===tb||t.id===tw));assert(list.data.every(t=>t.cwd===a));
   report.tests.push('native worktree ownership, SSH execution and project-filtered thread list');
   report.fixture=a;report.passed=true;
  }catch(e){report.passed=false;report.error=e.stack;process.exitCode=1;}
  finally{clearTimeout(watchdog);c.close();r.close();fs.writeFileSync(path.join(__dirname,'../evidence/native-workspace-e2e.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));}
-})().catch(e=>{console.error(e.stack);process.exit(1)});
+})().catch(e=>{console.error(e.stack);process.exit(1)}).finally(()=>process.exit(process.exitCode||0));

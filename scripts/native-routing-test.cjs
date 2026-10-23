@@ -33,7 +33,7 @@ async function test(name,fn){await fn();tests.push(name);}
   return {};
  }}};
  let verified=0;
- const ctx={exports:{},require:id=>{assert.equal(id,'../../../app.asar/opencodex/native-agent-runs.cjs');return require('../src/native-agent-runs.cjs');},runtimes:new Map(),refreshMacExtensions:async()=>{},runtime_policy_1:{macThreadConfig:()=>({safe:true})},permission_policy_1:{codexPermissionPolicy:()=>({sandbox:'read-only',approvalPolicy:'untrusted'})},runtime_extensions_1:{macRuntimeInstructions:()=>'local'},verifyThreadMcp:async()=>{verified++},node_crypto_1:require('node:crypto')};
+ const ctx={exports:{},require:id=>{if(id==='../../../app.asar/opencodex/native-input.cjs')return require('../src/native-input.cjs');assert.equal(id,'../../../app.asar/opencodex/native-agent-runs.cjs');return require('../src/native-agent-runs.cjs');},runtimes:new Map(),refreshMacExtensions:async()=>{},runtime_policy_1:{macThreadConfig:()=>({safe:true})},permission_policy_1:{codexPermissionPolicy:()=>({sandbox:'read-only',approvalPolicy:'untrusted'})},runtime_extensions_1:{macRuntimeInstructions:()=>'local'},verifyThreadMcp:async()=>{verified++},node_crypto_1:require('node:crypto')};
  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../src/bridge-adapter.cjs'),'utf8'),ctx);
  await test('fork reinitializes executor before a new turn',async()=>{
   const out=await ctx.exports.openCodexRequest(runtime,{},'thread/fork',{threadId:'own',cwd:'C:\\foreign'});
@@ -47,13 +47,15 @@ async function test(name,fn){await fn();tests.push(name);}
   await assert.rejects(ctx.exports.openCodexRequest(runtime,{},'review/start',{threadId:'own',delivery:'detached'}),/分支/);
  });
  const policy=require('../src/native-policy.cjs');
- await test('native permission selections map to executor policy and reject unknown profiles',async()=>{
+ await test('native permission selections preserve custom names and reject unknown reserved profiles',async()=>{
   assert.equal(policy.selectedMode({permissions:':workspace'}),'project');
   assert.equal(policy.selectedMode({permissions:':danger-full-access'}),'full');
   assert.equal(policy.selectedMode({sandboxPolicy:{type:'readOnly'}}),'ask');
   assert.equal(policy.selectedMode({}),null);
-  assert.throws(()=>policy.selectedMode({permissions:'unknown'}),/權限/);
-  assert.throws(()=>policy.selectedMode({approvalsReviewer:'guardian_subagent'}),/使用者/);
+  assert.equal(policy.selectedMode({permissions:'audit'}),'custom:audit');
+  for(const permissions of [':unknown','',42,{}])assert.throws(()=>policy.selectedMode({permissions}),/權限/);
+  for(const approvalsReviewer of ['user','guardian_subagent','auto_review'])assert.equal(policy.selectedMode({approvalsReviewer}),null);
+  assert.throws(()=>policy.selectedMode({approvalsReviewer:'unknown'}),/審查/);
  });
  await test('Mac tool approvals decline by default and cannot approve a stopped run',async()=>{
   const active={openCodex:true},rt={run:active},decisions=[];
@@ -86,7 +88,7 @@ async function test(name,fn){await fn();tests.push(name);}
   ctx.runtime_policy_1.validateMacMcpInventory=require('../vendor/agentbridge/dist-main/runtime-policy.js').validateMacMcpInventory;
   runtime.openCodexDormantThreads=new Set(['own']);let started=false;
   runtime.rpc.request=async(method,p)=>{
-   if(method==='mcpServerStatus/list')return {data:[{name:'mac',runtimeStatus:'disabled',tools:{}}]};
+   if(method==='mcpServerStatus/list'){assert.equal(p.detail,'toolsAndAuthOnly');assert.equal(p.serverName,undefined);return {data:[{name:'mac',runtimeStatus:'disabled',tools:{}}]};}
    assert.equal(method,'turn/start');assert.equal(p.environments[0].environmentId,'mac');started=true;return {turn:{id:'resumed'}};
   };
   await ctx.exports.openCodexRequest(runtime,{},'turn/start',{threadId:'own',input:[]});assert(started);assert.equal(await runtime.run.toolGate,true);runtime.run=undefined;

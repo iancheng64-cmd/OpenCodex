@@ -57,7 +57,7 @@ function setup(){
   resume(()=>released++);await assert.rejects(result,/取消/);assert.equal(released,1);assert(!f.calls.some(c=>c[0]==='orchestrator:start'));assert(!f.agents.active);
  });
  await test('two simultaneous hosts in one directory retain distinct native runtimes',async()=>{
-  let sequence=0;const owners=new NativeToolOwners(cwd=>({id:++sequence,cwd,closed:false,specs:async()=>[{id:'native'}],close(){this.closed=true;}}));
+  let sequence=0;const owners=new NativeToolOwners(cwd=>({id:++sequence,cwd,closed:false,ready:async()=>{},specs:async()=>[{id:'native'}],close(){this.closed=true;}}));
   const specA=await owners.specs('/same'),specB=await owners.specs('/same');
   const a={localCwd:'/same',run:{id:'a'},toolHost:{options:{extensionServers:specA},replaceNativeExtensions:async()=>{throw Error('unexpected reload');}}};
   const b={localCwd:'/same',run:{id:'b'},toolHost:{options:{extensionServers:specB},replaceNativeExtensions:async()=>{throw Error('unexpected reload');}}};
@@ -73,6 +73,21 @@ function setup(){
   const specs=await owners.specs('/one'),a={localCwd:'/one',toolHost:{options:{extensionServers:specs},replaceNativeExtensions:async()=>{throw Error('replace failed');}}};
   const specsB=await owners.specs('/two'),b={localCwd:'/two',host:{options:{extensionServers:specsB}}};owners.owner(b);owners.invalidate();
   await assert.rejects(owners.refresh(a),/replace failed/);assert(all.at(-1).closed);assert(!owners.owner(b).closed);owners.close();
+ });
+ await test('same-profile selection reinitializes a cancelled native host and propagates recovery failures',async()=>{
+  const {NativeTools}=require('../src/native-tools.cjs');
+  let starts=0,valid=true;
+  const owners=new NativeToolOwners(cwd=>{
+   const owner=new NativeTools({cwd,permissionProfile:'audit',validate:async()=>valid});
+   owner.start=async()=>{starts++;owner.permissionSnapshot={cwd,activePermissionProfile:{id:'audit'},sandbox:{type:'readOnly'}};return [];};
+   return owner;
+  });
+  const specs=await owners.specs('/same'),runtime={localCwd:'/same',openCodexPermissions:{profile:'audit'},toolHost:{options:{extensionServers:specs},replaceNativeExtensions:async()=>{throw Error('unexpected replacement');}}};
+  const owner=owners.owner(runtime);assert.equal(starts,1);
+  owner.reset();assert.equal(owner.permissionSnapshot,null);
+  await owners.refresh(runtime);
+  assert.equal(owners.owner(runtime),owner);assert.equal(starts,2);assert.equal(owner.permissionSnapshot.activePermissionProfile.id,'audit');
+  valid=false;await assert.rejects(owners.refresh(runtime),/權限設定/);assert(owner.closed);owners.close();
  });
  fs.writeFileSync(path.join(__dirname,'../evidence/native-agents-unit.json'),JSON.stringify({at:new Date().toISOString(),tests,passed:true},null,2)+'\n');
 })().catch(e=>{console.error(e.stack);process.exitCode=1;});

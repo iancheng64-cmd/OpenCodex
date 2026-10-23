@@ -3,12 +3,12 @@ const fs=require('node:fs'),path=require('node:path'),assert=require('node:asser
 const {cdp,rpc,wait}=require('./qa-client.cjs');
 const out=path.resolve(__dirname,'../evidence/native-mcp-gui-e2e.json');
 (async()=>{
- const report={at:new Date().toISOString(),version:'0.4.8',passed:false,scope:'real native composer, GPT tool call, embedded MCP Apps UI'};
+ const report={at:new Date().toISOString(),version:'0.4.10',passed:false,scope:'real native composer, GPT tool call, embedded MCP Apps UI'};
  report.asarSHA256=crypto.createHash('sha256').update(fs.readFileSync(path.resolve(__dirname,'../build/OpenCodex.app/Contents/Resources/app.asar'))).digest('hex');
  const save=()=>fs.writeFileSync(out,JSON.stringify(report,null,2),{mode:0o600});
  let c,r;save();
  try{
-  c=await cdp();r=await rpc();await r.call('initialize',{clientInfo:{name:'opencodex-mcp-gui-qa',version:'0.4.8'}});
+  c=await cdp();r=await rpc();await r.call('initialize',{clientInfo:{name:'opencodex-mcp-gui-qa',version:'0.4.10'}});
   const status=await c.evaluate('window.openCodexRuntime.status()');assert.equal(status.connected,true);
   assert(await c.evaluate('!!document.querySelector(".ProseMirror[contenteditable=true]")'));
   assert.equal(await c.evaluate('document.querySelector(".ProseMirror").innerText.trim()'),'');
@@ -28,4 +28,4 @@ const out=path.resolve(__dirname,'../evidence/native-mcp-gui-e2e.json');
   report.phase='model-completed-awaiting-widget-interaction';
  }catch(e){report.error=e.stack;process.exitCode=1;}
  finally{save();r?.close();c?.close();console.log(JSON.stringify({...report,dom:report.dom?{text:report.dom.text.slice(-3500),frames:report.dom.frames,mcpElements:report.dom.mcpElements}:null,events:report.events?.map(e=>({method:e.method,itemType:e.params?.item?.type,tool:e.params?.item?.tool,result:e.params?.item?.result}))}));}
-})();
+})().finally(()=>process.exit(process.exitCode||0));

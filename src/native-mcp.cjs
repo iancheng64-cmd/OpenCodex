@@ -42,9 +42,9 @@ function projectResult(id,value){
  return next;
 }
 class NativeMcpBridge{
- constructor({getClients,getEntries,getGeneration=()=>0,active=new Set(),authorizeResource,authorizeTool,requestTimeoutMs=120000}){
+ constructor({getClients,getEntries,getGeneration=()=>0,active=new Set(),authorizeResource,authorizeTool,withNativeContext,invokeTool,readResource,requestTimeoutMs=120000}){
   if(typeof getClients!=='function'||typeof authorizeResource!=='function')throw Error('Native MCP resource authorization is required');
-  Object.assign(this,{getClients,getEntries,getGeneration,active,authorizeResource,authorizeTool,requestTimeoutMs});
+  Object.assign(this,{getClients,getEntries,getGeneration,active,authorizeResource,authorizeTool,withNativeContext,invokeTool,readResource,requestTimeoutMs});
  }
  resolve(uri){
   if(typeof uri!=='string'||uri.length>20000)throw Error('Invalid Mac MCP resource URI');
@@ -68,7 +68,8 @@ class NativeMcpBridge{
   if(signal?.aborted)throw Error('Mac MCP app tool request cancelled');
   const resourceUri=params?._meta?.['opencodex/resourceUri'];
   const resolved=this.resolve(resourceUri),generation=this.getGeneration(),entries=this.getEntries();
-  if(resolved.id.startsWith('opencodex-native:')||resolved.client.spec?.transport==='native')throw Error('Native tool app actions require an explicit native approval context');
+  const native=resolved.id.startsWith('opencodex-native:')||resolved.client.spec?.transport==='native';
+  if(native&&typeof this.withNativeContext!=='function')throw Error('Native tool app actions require an explicit native approval context');
   if(typeof params.tool!=='string'||!params.tool||params.tool.length>1000)throw Error('Invalid Mac MCP app tool name');
   const name=entries.has(params.tool)?params.tool:bridgeToolName(resolved.id,params.tool),entry=entries.get(name);
   if(!entry||entry.extensionId!==resolved.id||entry.category!=='extension'||entry.available?.()!==true||typeof entry.invoke!=='function')throw Error('Mac MCP app tool is unavailable or belongs to another server');
@@ -96,7 +97,8 @@ class NativeMcpBridge{
    await checkOwner();
    // The production entry invokes the authenticated owning client and already
    // projects the result using that client's namespace.
-   const result=await entry.invoke(args,controller.signal);
+   const invoke=()=>this.invokeTool?this.invokeTool({entry,name,args,signal:controller.signal,client:resolved.client,invoke:()=>entry.invoke(args,controller.signal)}):entry.invoke(args,controller.signal);
+   const result=await (native?this.withNativeContext({context,signal:controller.signal},invoke):invoke());
    await checkOwner();
    if(!object(result)||!Array.isArray(result.content))throw Error('Invalid Mac MCP app tool response');
    return result;
@@ -124,7 +126,11 @@ class NativeMcpBridge{
   const work=async()=>{
    if(!await this.authorizeResource({serverId:resolved.id,uri:resolved.uri,context,signal:controller.signal}))throw Error('Mac MCP resource permission denied');
    assertCurrent();
-   const result=await resolved.client.resource('resources/read',{uri:resolved.uri},controller.signal);
+   const invoke=()=>resolved.client.resource('resources/read',{uri:resolved.uri},controller.signal);
+   const read=()=>this.readResource?this.readResource({serverId:resolved.id,client:resolved.client,signal:controller.signal,invoke}):invoke();
+   const native=resolved.id.startsWith('opencodex-native:')||resolved.client.spec?.transport==='native';
+   if(native&&typeof this.withNativeContext!=='function')throw Error('Native tool resources require an explicit native approval context');
+   const result=await (native?this.withNativeContext({context,signal:controller.signal},read):read());
    assertCurrent();
    if(!await this.authorizeResource({serverId:resolved.id,uri:resolved.uri,context,signal:controller.signal}))throw Error('Mac MCP resource permission denied');
    assertCurrent();

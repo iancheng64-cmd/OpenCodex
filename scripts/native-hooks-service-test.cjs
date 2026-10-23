@@ -9,7 +9,7 @@ function fixture(){
   if(method==='thread/resume')return {thread:{id:params.threadId,environments:[{environmentId:'mac'}]}};
   if(method==='turn/start')return {turn:{id:'turn'}};return {};
  }}};
- const ctx={exports:{},require:id=>{assert.equal(id,'../../../app.asar/opencodex/native-agent-runs.cjs');return require('../src/native-agent-runs.cjs');},runtimes:new Map(),refreshMacExtensions:async()=>{},runtime_policy_1:{macThreadConfig:()=>({safe:true})},permission_policy_1:{codexPermissionPolicy:()=>({sandbox:'read-only',approvalPolicy:'untrusted'})},runtime_extensions_1:{macRuntimeInstructions:()=>'local'},verifyThreadMcp:async()=>{},node_crypto_1:require('node:crypto')};
+ const ctx={exports:{},require:id=>{if(id==='../../../app.asar/opencodex/native-input.cjs')return require('../src/native-input.cjs');assert.equal(id,'../../../app.asar/opencodex/native-agent-runs.cjs');return require('../src/native-agent-runs.cjs');},runtimes:new Map(),refreshMacExtensions:async()=>{},runtime_policy_1:{macThreadConfig:()=>({safe:true})},permission_policy_1:{codexPermissionPolicy:()=>({sandbox:'read-only',approvalPolicy:'untrusted'})},runtime_extensions_1:{macRuntimeInstructions:()=>'local'},verifyThreadMcp:async()=>{},node_crypto_1:require('node:crypto')};
  vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'../src/bridge-adapter.cjs'),'utf8'),ctx);
  return {runtime,calls,ctx,request:(deps,method,p)=>ctx.exports.openCodexRequest(runtime,deps,method,p)};
 }

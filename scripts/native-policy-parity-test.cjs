@@ -68,7 +68,8 @@ const rendererTurn=s=>({permissions:s.activePermissionProfile?.id??null,sandboxP
  await test('empty settings/update replies and unrelated thread/turn payloads keep their exact shape',()=>{
   for(const value of [null,undefined,{},[],{thread:{id:'t'}},{turn:{id:'turn'}},{model:'chosen'}])assert.equal(policy.localSnapshot(value,'project'),value);
   assert.throws(()=>policy.localSnapshot(peerSnapshot(),'custom'),/權限/);
-  assert.throws(()=>policy.resolveMode({permissions:'peer-custom-profile'},'project',{}),/權限/);
+  assert.deepEqual(policy.resolveMode({permissions:'peer-custom-profile'},'project',{}),{requested:'custom:peer-custom-profile',effective:'custom:peer-custom-profile'});
+  assert.throws(()=>policy.resolveMode({permissions:':unknown'},'project',{}),/權限/);
  });
  await test('mapping both snapshot formats never mutates peer writable roots or profile objects',()=>{
   const remote={sandbox:{type:'workspaceWrite',writableRoots:['C:\\peer']},sandboxPolicy:{type:'dangerFullAccess'},activePermissionProfile:{id:'peer'}};
@@ -77,8 +78,23 @@ const rendererTurn=s=>({permissions:s.activePermissionProfile?.id??null,sandboxP
   assert.deepEqual(local.sandbox,{type:'readOnly'});assert.deepEqual(local.sandboxPolicy,{type:'readOnly'});
   assert.notEqual(local.sandbox,local.sandboxPolicy);assert.equal(remote.activePermissionProfile.id,'peer');
  });
+ await test('custom snapshots use verified Mac policy and retain it through offline history and highest-access restore',()=>{
+  const cwd='/Users/test/project',selection={requested:'custom:audit',effective:'custom:audit'};
+  const verified={cwd,sandbox:{type:'workspaceWrite',writableRoots:[cwd+'/output'],networkAccess:false},approvalPolicy:'untrusted',activePermissionProfile:{id:'audit',extends:':read-only'}};
+  const local=policy.localSnapshot(peerSnapshot(),selection,cwd,verified);
+  assert.deepEqual(local.sandbox,verified.sandbox);assert.equal(local.activePermissionProfile.id,'audit');
+  assert.deepEqual(policy.resolveMode(rendererTurn(local),'project',{}),selection);
+  local.sandbox.writableRoots.push('/mutation');assert.equal(verified.sandbox.writableRoots.length,1);
+  const restored=policy.localSnapshot(peerSnapshot(),selection,cwd,JSON.parse(JSON.stringify(verified)));
+  assert.deepEqual(restored.sandbox,verified.sandbox);
+  for(const stale of [undefined,{...verified,cwd:'/other'},{...verified,activePermissionProfile:{id:'other'}},{...verified,sandbox:null}])
+   assert.throws(()=>policy.localSnapshot(peerSnapshot(),selection,cwd,stale),/已驗證/);
+  const full=policy.localSnapshot(peerSnapshot(),{...selection,effective:'full'},cwd);
+  assert.equal(full.sandbox.type,'dangerFullAccess');assert.equal(full.activePermissionProfile.id,'audit');
+  assert.deepEqual(policy.resolveMode(rendererTurn(full),null,{fullAccess:false}),selection);
+ });
  await test('settings and turn requests still enforce peer isolation independently of renderer snapshots',async()=>{
-  const calls=[],context={exports:{},require:id=>{assert.equal(id,'../../../app.asar/opencodex/native-agent-runs.cjs');return require('../src/native-agent-runs.cjs');},runtimes:new Map(),node_crypto_1:crypto,refreshMacExtensions:async()=>{},verifyThreadMcp:async()=>{}};
+  const calls=[],context={exports:{},require:id=>{if(id==='../../../app.asar/opencodex/native-input.cjs')return require('../src/native-input.cjs');assert.equal(id,'../../../app.asar/opencodex/native-agent-runs.cjs');return require('../src/native-agent-runs.cjs');},runtimes:new Map(),node_crypto_1:crypto,refreshMacExtensions:async()=>{},verifyThreadMcp:async()=>{}};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../src/bridge-adapter.cjs'),'utf8'),context);
   const runtime={closed:false,executor:{isRunning:true,environmentId:'mac'},snapshot:{executorEnvironment:{}},localCwd:'/Users/test/project',openCodexThreads:new Set(['thread']),
    rpc:{request:async(method,params)=>{calls.push({method,params});return method==='turn/start'?{turn:{id:'turn'}}:{};}}};
@@ -96,6 +112,23 @@ const rendererTurn=s=>({permissions:s.activePermissionProfile?.id??null,sandboxP
    assert.equal(sent.approvalPolicy,mode==='full'?'never':'untrusted');
    assert.equal(sent.environments[0].environmentId,'mac');
   }
+ });
+ await test('reading history after native cancellation uses only the saved display snapshot; execution still needs a current owner',()=>{
+  const cwd='/Users/test/project',selection={requested:'custom:audit',effective:'custom:audit'};
+  const saved={cwd,sandbox:{type:'readOnly'},approvalPolicy:'untrusted',activePermissionProfile:{id:'audit'}};
+  const owner={closed:false,localCwd:cwd,permissionMode:selection.effective};
+  let liveReads=0;
+  const context={known:{thread:{permissionSnapshot:saved}},bridge:{runtimeDependencies:{nativePermissionSnapshot:()=>{liveReads++;throw Error('native host reset');}}}};
+  const source=fs.readFileSync(path.join(__dirname,'../src/bootstrap.cjs'),'utf8');
+  const start=source.indexOf('function permissionSnapshot('),end=source.indexOf('\nfunction attach(',start);
+  assert(start>=0&&end>start);vm.runInNewContext(source.slice(start,end),context);
+  const history=context.permissionSnapshot(owner,selection,cwd,'thread',true);
+  assert.deepEqual(policy.localSnapshot(peerSnapshot(),selection,cwd,history).sandbox,saved.sandbox);assert.equal(liveReads,0);
+  assert.throws(()=>context.permissionSnapshot(owner,selection,cwd,'thread'),/native host reset/);
+  assert.equal(liveReads,1);
+  const missing=context.permissionSnapshot(owner,selection,cwd,'missing',true);
+  assert.throws(()=>policy.localSnapshot(peerSnapshot(),selection,cwd,missing),/已驗證/);
+  assert.match(source,/permissionSnapshot\(requestOwner,selection,resultCwd,params\?\.threadId,wireMethod==='thread\/read'\)/);
  });
  console.log(JSON.stringify({passed:true,tests,scope:'Permission snapshot and existing adapter regression with mocked SSH; no live execution claim'}));
 })().catch(error=>{console.error(error.stack);process.exitCode=1});

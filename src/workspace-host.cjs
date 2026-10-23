@@ -24,6 +24,8 @@ LocalToolHost.prototype.openCodexMcpResourceRead = async function(uri, context =
   getGeneration: () => this.generation,
   active: this.active,
   authorizeResource: () => context.isAuthorized() === true,
+  withNativeContext: context.withNativeContext,
+  readResource: request => this.openCodexPermissionDispatch ? this.openCodexPermissionDispatch.resource(request) : request.invoke(),
   requestTimeoutMs: this.options.requestTimeoutMs || 120000
  });
  return bridge.read(uri, { context, signal: context.signal });
@@ -39,6 +41,8 @@ LocalToolHost.prototype.openCodexMcpToolCall = async function(params, context = 
   getGeneration: () => this.generation,
   active: this.active,
   authorizeResource: () => context.isAuthorized() === true,
+  withNativeContext: context.withNativeContext,
+  invokeTool: request => this.openCodexInvokeTool(request.entry,request.args,request.signal),
   authorizeTool: call => context.authorizeTool(call),
   requestTimeoutMs: this.options.requestTimeoutMs || 120000
  });

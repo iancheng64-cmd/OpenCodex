@@ -6,9 +6,9 @@ const fs=require('fs'),path=require('path'),os=require('os'),assert=require('ass
  await new Promise((r,j)=>{ws.onopen=r;ws.onerror=j});
  ws.onmessage=e=>{const m=JSON.parse(e.data);const p=pending.get(m.id);if(p){clearTimeout(p.timer);pending.delete(m.id);m.error?p.reject(Error(m.error.message)):p.resolve(m.result)}else events.push(m);};
  const call=(method,params={})=>new Promise((resolve,reject)=>{const id=++seq,timer=setTimeout(()=>{pending.delete(id);reject(Error('Timeout '+method))},12000);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params}));});
- const out={version:'0.4.8',at:new Date().toISOString(),tests:[]};
+ const out={version:'0.4.10',at:new Date().toISOString(),tests:[]};
  try{
-  const init=await call('initialize',{clientInfo:{name:'opencodex-native-local-test',version:'0.4.8'},capabilities:{experimentalApi:true}});
+  const init=await call('initialize',{clientInfo:{name:'opencodex-native-local-test',version:'0.4.10'},capabilities:{experimentalApi:true}});
   assert(init.codexHome.startsWith(root+'/'));out.tests.push('isolated native app-server');
   const skills=await call('skills/list',{cwds:[os.homedir()],forceReload:true});out.skills=skills.data.reduce((n,x)=>n+x.skills.length,0);out.skillErrors=skills.data.reduce((n,x)=>n+x.errors.length,0);assert(out.skills>0);out.tests.push('native skills discovery');
   const plugins=await call('plugin/list',{cwds:[os.homedir()],marketplaceKinds:['local'],forceRefetch:false});out.localPluginCatalog=Object.keys(plugins);out.tests.push('local plugin discovery');
@@ -25,4 +25,4 @@ const fs=require('fs'),path=require('path'),os=require('os'),assert=require('ass
   await assert.rejects(call('thread/start',{}),/SSH|連線|connect/i);out.tests.push('offline submission cannot run on unintended local runtime');
   out.passed=true;fs.writeFileSync(path.join(__dirname,'../evidence/native-local-test.json'),JSON.stringify(out,null,2));console.log(JSON.stringify(out));
  }finally{ws.close()}
-})().catch(e=>{console.error(e.stack);process.exit(1)});
+})().catch(e=>{console.error(e.stack);process.exit(1)}).finally(()=>process.exit(process.exitCode||0));

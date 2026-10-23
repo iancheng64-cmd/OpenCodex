@@ -22,12 +22,12 @@ class NativeClaude{
  save(){const tmp=this.file+'.'+crypto.randomUUID()+'.tmp';try{fs.writeFileSync(tmp,JSON.stringify({version:1,entries:this.entries}),{mode:0o600,flag:'wx'});fs.renameSync(tmp,this.file);}finally{try{fs.unlinkSync(tmp);}catch(e){if(e.code!=='ENOENT')throw e;}}}
  note(method,params){this.emit({method,params:clone(params)});}
  attach(runtime,snapshot){if(this.busy)throw Error('請先停止 Claude 工作。');this.runtime=runtime;this.failed=false;this.snapshot=snapshot;this.loaded.clear();runtime.localCwd=runtime.cwd;runtime.toolHost=runtime.host;this.onState();}
- state(){const r=this.runtime,s=this.connected?r.cli.status():this.snapshot;return {sshAgent:'claude',connected:this.connected,executor:this.connected&&!!r.host?.status().ok,tools:this.connected?r.host?.listTools().length||0:0,profile:r?.hostName||this.settings.profileName,profileId:this.profile,cwd:r?.cwd||this.settings.cwd,transport:r?.network?.transport||null,runtimeVersion:s?.runtimeVersion||null,permissionMode:r?.permissionMode||this.settings.permissionMode,permissionBusy:this.busy||this.queue.starting,authentication:{status:!this.connected?'disconnected':s?.account?.verified!==true?'unverified':s?.account?.authenticated===true?'authenticated':'required',method:s?.account?.authMethod||null},quota:{account:s?.account||null,quota:s?.quota?{...s.quota,buckets:(s.quota.windows||[]).map(w=>({name:w.name,primary:w}))}:null,source:'SSH · Claude Code',status:!this.connected?'disconnected':s?.quota?.stale?'unavailable':s?.quota?'available':'loading',stale:!this.connected||!!s?.quota?.stale,error:s?.quota?.error||null},engine:'opencodex-claude-ssh'};}
+ state(){const r=this.runtime,s=this.connected?r.cli.status():this.snapshot;return {sshAgent:'claude',connected:this.connected,executor:this.connected&&!!r.host?.status().ok,tools:this.connected?r.host?.listTools().length||0:0,profile:r?.hostName||this.settings.profileName,profileId:this.profile,cwd:r?.cwd||this.settings.cwd,transport:r?.network?.transport||null,runtimeVersion:s?.runtimeVersion||null,permissionMode:r?.permissionMode||this.settings.permissionMode,permissionBusy:this.busy||this.queue.starting,authentication:{status:!this.connected?'disconnected':s?.account?.authProblem==='credential-unavailable'?'blocked':s?.account?.verified!==true?'unverified':s?.account?.authenticated===true?'authenticated':'required',method:s?.account?.authMethod||null},quota:{account:s?.account||null,quota:s?.quota?{...s.quota,buckets:(s.quota.windows||[]).map(w=>({name:w.name,primary:w}))}:null,source:'SSH · Claude Code',status:!this.connected?'disconnected':s?.account?.authProblem==='credential-unavailable'?'auth-blocked':s?.account?.verified!==true?'auth-unverified':s?.account?.authenticated!==true?'auth-required':s?.quota?.stale?'unavailable':s?.quota?'available':'loading',stale:!this.connected||!!s?.quota?.stale,error:s?.account?.error||s?.quota?.error||null},engine:'opencodex-claude-ssh'};}
  async disconnect(){if(this.busy)throw Error('請先停止 Claude 工作。');const r=this.runtime;this.runtime=null;this.loaded.clear();if(r&&!r.closed)await this.invoke('claude:disconnect',r.cli.id);this.onState();}
  async permission(mode){if(this.connected)await this.invoke('claude:permission',this.runtime.cli.id,mode);}
  async refreshAccount(){if(this.connected){await this.runtime.cli.refreshAccount();this.onState();}}
  async quota(){if(this.connected){await this.refreshAccount();await this.invoke('claude:quota',this.runtime.cli.id);}}
- models(){return (this.connected?this.runtime.cli.status().models||[]:[]).map(m=>({...m,defaultReasoningEffort:m.defaultReasoningEffort||m.supportedReasoningEfforts?.[0]?.reasoningEffort||'none',hidden:false,supportsPersonality:false,inputModalities:['text','image']}));}
+ models(){return (this.connected?this.runtime.cli.status().models||[]:[]).map(m=>({...m,defaultReasoningEffort:m.defaultReasoningEffort||m.supportedReasoningEfforts?.[0]?.reasoningEffort||'none',hidden:false,supportsPersonality:false,inputModalities:m.inputModalities||['text','image']}));}
  model(value){const models=this.models(),m=value?models.find(m=>m.model===value||m.id===value):models.find(m=>m.isDefault)||models[0];if(!m)throw Error(value?'此 Claude 模型不在主機提供的模型清單。':'尚未取得 Claude 模型清單。');return m.model;}
  response(e,includeTurns=true){const thread=this.shell?this.shell.merge(e.thread):e.thread;const mode=policy.resolveMode({},e.permissionMode,this.settings).effective;return {thread:{...clone(thread),turns:includeTurns?clone(thread.turns):[]},model:e.thread.model,modelProvider:'anthropic',cwd:e.thread.cwd,approvalPolicy:mode==='full'?'never':'on-request',approvalsReviewer:'user',sandbox:mode==='full'?{type:'dangerFullAccess'}:mode==='ask'?{type:'readOnly'}:{type:'workspaceWrite',writableRoots:[e.thread.cwd],networkAccess:true},reasoningEffort:e.thread.reasoningEffort||null};}
  handles(method){return /^(thread\/|turn\/|review\/)/.test(method)||routing.reads.has(method);}
@@ -62,6 +62,7 @@ class NativeClaude{
    if(run&&run.threadId===p.threadId&&(!p.turnId||run.turnId===p.turnId)){run.cancelled=true;await this.invoke('claude:cancel',this.runtime.cli.id,run.requestId);}
    return {};
   }
+  if(method==='turn/steer')return this.steer(e,p);
   if(!this.connected)throw Error('Claude SSH 尚未連線；歷史對話仍可閱讀。');
   if(this.busy||(!fromQueue&&this.queue.starting))throw Error('請先停止目前 Claude 工作。');
   if(['thread/name/set','thread/archive','thread/unarchive','thread/delete','thread/unsubscribe'].includes(method)){
@@ -77,7 +78,8 @@ class NativeClaude{
    try{
     const w=await this.workspace(e,p),model=this.model(p.model||e?.thread.model),timestamp=now();
     if(e){e.thread.model=model;e.thread.status={type:'idle'};this.loaded.add(e.thread.id);this.save();return this.response(e);}
-    const id=crypto.randomUUID(),entry={profile:this.profile,fingerprint:this.runtime.network.hostFingerprint,permissionMode:w.mode,conversationId:null,instructions:[p.baseInstructions,p.developerInstructions].filter(Boolean).join('\n\n'),thread:{id,sessionId:id,preview:'',model,modelProvider:'anthropic',createdAt:timestamp,updatedAt:timestamp,status:{type:'idle'},cwd:w.cwd,cliVersion:this.runtime.cli.status().runtimeVersion||'',source:'appServer',projectId:null,ephemeral:false,name:null,turns:[],reasoningEffort:p.reasoningEffort||null}};
+    // A same-thread model handoff mirrors the native Codex thread id.
+    const id=typeof p.openCodexThreadId==='string'&&p.openCodexThreadId&&!this.entries[p.openCodexThreadId]?p.openCodexThreadId:crypto.randomUUID(),entry={profile:this.profile,fingerprint:this.runtime.network.hostFingerprint,permissionMode:w.mode,conversationId:null,instructions:[p.baseInstructions,p.developerInstructions].filter(Boolean).join('\n\n'),thread:{id,sessionId:id,preview:'',model,modelProvider:'anthropic',createdAt:timestamp,updatedAt:timestamp,status:{type:'idle'},cwd:w.cwd,cliVersion:this.runtime.cli.status().runtimeVersion||'',source:'appServer',projectId:null,ephemeral:false,name:null,turns:[],reasoningEffort:p.reasoningEffort||null}};
     this.entries[id]=entry;this.loaded.add(id);this.save();this.note('thread/started',{thread:this.response(entry,false).thread});return this.response(entry,false);
    }finally{this.preparing=false;this.onState();}
   }
@@ -181,7 +183,7 @@ class NativeClaude{
    if(pending.length)content.unshift(...pending.map(text=>({type:'text',text})));
    await this.workspace(e,p);check();await this.refreshTools(this.runtime);check();
    if(!this.runtime.cli.status().account?.authenticated)await this.runtime.cli.refreshAccount();
-   check();if(!this.runtime.cli.status().account?.authenticated)throw Error('遠端 Claude 尚未完成登入。');
+   check();const account=this.runtime.cli.status().account;if(!account?.authenticated)throw Error(account?.error||(account?.verified?'遠端 Claude 尚未完成登入。':'無法確認遠端 Claude 登入狀態，請更新後重試。'));
    const turn={id:crypto.randomUUID(),status:'inProgress',items:[],startedAt:now(),completedAt:null,error:null};
    run={openCodex:true,review,threadId:e.thread.id,turnId:turn.id,requestId:turn.id,cancelled:false,turn,entry:e,items:new Map(),startedAt:Date.now()};
    this.runtime.run=run;e.thread.turns.push(turn);e.thread.model=model;e.thread.updatedAt=now();e.thread.status={type:'active',activeFlags:[]};
@@ -189,13 +191,37 @@ class NativeClaude{
    this.loaded.add(e.thread.id);this.save();this.note('turn/started',{threadId:e.thread.id,turn});
    if(review)this.item(run,{id:crypto.randomUUID(),type:'enteredReviewMode',review},true);
    else this.item(run,{id:crypto.randomUUID(),type:'userMessage',content:clone(p.input),clientId:p.clientUserMessageId||null},true);
-   await this.runtime.cli.send({requestId:run.requestId,conversationId:e.conversationId||undefined,forkSession:e.forkSession===true,prompt:content.filter(v=>v.type==='text').map(v=>v.text).join('\n'),content,model,effort:this.effort(model,p.effort||p.reasoningEffort||e.thread.reasoningEffort),systemPrompt:e.instructions});
+   await this.runtime.cli.send({requestId:run.requestId,conversationId:e.conversationId||undefined,forkSession:e.forkSession===true,prompt:content.filter(v=>v.type==='text').map(v=>v.text).join('\n'),content,model,effort:this.effort(model,p.effort||p.reasoningEffort||p.collaborationMode?.settings?.reasoning_effort||e.thread.reasoningEffort),systemPrompt:e.instructions});
    if(pending.length){e.pendingContext=(e.pendingContext||[]).slice(pending.length);this.save();}
    return {turn:clone(turn)};
   }catch(error){if(run&&this.runtime?.run===run)this.finish('failed',error.message);throw error;}
   finally{this.preparing=false;this.onState();}
  }
- effort(model,value){if(!value||value==='none')return undefined;const m=this.models().find(m=>m.model===model);if(!m?.supportedReasoningEfforts?.some(e=>e.reasoningEffort===value))return undefined;return value;}
+ // Native "steer": guidance for the turn already running. The app-server's own error
+ // strings let the native composer queue the message when the turn has ended, or retry
+ // with the turn id it reports.
+ async steer(e,p){
+  if(!e)throw Error('缺少 Claude 對話。');
+  const run=this.runtime?.run;
+  if(!this.connected||!run||run.threadId!==e.thread.id||run.cancelled)throw Error('no active turn to steer');
+  if(run.review)throw Error('cannot steer a review turn');
+  if(p.expectedTurnId&&p.expectedTurnId!==run.turnId)throw Error('expected active turn id `'+p.expectedTurnId+'` but found `'+run.turnId+'`');
+  const content=await this.content(p.input);
+  if(typeof p.additionalContext==='string'&&p.additionalContext.trim())content.push({type:'text',text:p.additionalContext});
+  if(this.runtime?.run!==run||run.cancelled||!this.connected)throw Error('no active turn to steer');
+  this.runtime.cli.steer(content);
+  this.item(run,{id:crypto.randomUUID(),type:'userMessage',content:clone(p.input),clientId:p.clientUserMessageId||null},true);
+  e.thread.updatedAt=now();this.save();
+  return {turnId:run.turnId};
+ }
+ // Always explicit: the chosen supported effort, else the model default; '' clears any
+ // effort a previous Claude process was started with when the model has no effort control.
+ effort(model,value){
+  const m=this.models().find(m=>m.model===model),supported=(m?.supportedReasoningEfforts||[]).map(e=>e.reasoningEffort);
+  if(!supported.length)return '';
+  if(value&&supported.includes(value))return value;
+  return supported.includes(m.defaultReasoningEffort)?m.defaultReasoningEffort:supported.includes('high')?'high':supported[0];
+ }
  item(run,item,complete=false){
   if(!run.items.has(item.id)){run.items.set(item.id,item);run.turn.items.push(item);this.note('item/started',{threadId:run.threadId,turnId:run.turnId,item});}
   if(complete)this.note('item/completed',{threadId:run.threadId,turnId:run.turnId,item});

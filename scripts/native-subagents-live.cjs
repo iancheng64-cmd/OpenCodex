@@ -2,7 +2,7 @@
 // Real SSH model and native Node plugin; only an owned fixture directory is accessed.
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),crypto=require('node:crypto');
 const {rpc,wait,cdp}=require('./qa-client.cjs');
-const evidence=path.resolve(__dirname,'../evidence'),report={version:'0.4.8',at:new Date().toISOString(),externalModel:true,passed:false};
+const evidence=path.resolve(__dirname,'../evidence'),report={version:'0.4.10',at:new Date().toISOString(),externalModel:true,passed:false};
 report.asarSHA256=crypto.createHash('sha256').update(fs.readFileSync(path.resolve(__dirname,'../build/OpenCodex.app/Contents/Resources/app.asar'))).digest('hex');
 let r,c,threadId,turnId;
 (async()=>{
@@ -38,4 +38,4 @@ let r,c,threadId,turnId;
 })().catch(e=>{report.error=e.stack;process.exitCode=1;}).finally(async()=>{
  if(!report.passed&&threadId&&turnId)try{await r.call('turn/interrupt',{threadId,turnId},10000);}catch{}
  r?.close();c?.close();fs.writeFileSync(path.join(evidence,'native-subagents-live.json'),JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report));
-});
+}).finally(()=>process.exit(process.exitCode||0));

@@ -52,8 +52,8 @@ assert ui['agentBridgeMainLoaded'] is False
 assert modes['restoredSSH'] and modes['rejectUnsafeUrl']
 assert modes['custom']['status']=='completed' and modes['custom']['mock']
 assert modes['official']['initialized']
-run(['/Users/ian/.local/bin/node','scripts/quota-test.cjs'])
-run(['/Users/ian/.local/bin/node','scripts/ssh-profiles-test.cjs'])
+run(['node','scripts/quota-test.cjs'])
+run(['node','scripts/ssh-profiles-test.cjs'])
 print('Versioned tests, current original-app baseline and signature verified',flush=True)
 install_needed=not installed.exists() or storage.sealed_identity(source)!=storage.sealed_identity(installed)
 if install_needed and installed.exists() and storage.process_uses(installed):

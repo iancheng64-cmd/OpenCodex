@@ -25,7 +25,7 @@ const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
  const thread=await call(resumeId?'thread/resume':'thread/start',resumeId?{threadId:resumeId}:{model:models.data.find(m=>m.isDefault)?.id||models.data[0].id});
  results.resumed=!!resumeId;
  threadId=thread.thread.id;results.threadId=threadId;
- const response=await call('turn/start',{threadId,input:[{type:'text',text:native?'這是 OpenCodex 原生外掛驗收。請從目前工具目錄找到描述為 Codex 原生 · node_repl 的 js 工具，實際呼叫它執行 console.log("OPENCODEX-NATIVE-SSH-"+(6*7))。不要改用 shell 或其他 Node 工具，不要修改檔案或上網；只回覆該工具輸出的驗收碼。':'這是 OpenCodex 整合驗收。請實際使用 Mac 工具讀取 /Users/ian/Projects/OpenCodex/evidence/executor-sentinel.txt。只回覆檔案裡的驗收碼。請勿修改任何檔案，也不要使用網路。'}],effort:'low'});
+ const response=await call('turn/start',{threadId,input:[{type:'text',text:native?'這是 OpenCodex 原生外掛驗收。請從目前工具目錄找到描述為 Codex 原生 · node_repl 的 js 工具，實際呼叫它執行 console.log("OPENCODEX-NATIVE-SSH-"+(6*7))。不要改用 shell 或其他 Node 工具，不要修改檔案或上網；只回覆該工具輸出的驗收碼。':'這是 OpenCodex 整合驗收。請實際使用 Mac 工具讀取 '+require('node:path').resolve(__dirname,'../evidence/executor-sentinel.txt')+'。只回覆檔案裡的驗收碼。請勿修改任何檔案，也不要使用網路。'}],effort:'low'});
  turnId=response.turn.id;results.turnId=turnId;
  await done;clearTimeout(timer);
  const expected=native?'OPENCODEX-NATIVE-SSH-42':fs.readFileSync(path.join(__dirname,'../evidence/executor-sentinel.txt'),'utf8').trim();

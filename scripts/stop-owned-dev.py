@@ -1,5 +1,6 @@
 import os,signal,subprocess,time,sys
-prefix='/Users/ian/Projects/OpenCodex/build/OpenCodex.app/'
+from pathlib import Path
+prefix=str(Path(__file__).resolve().parent.parent/'build/OpenCodex.app')+'/'
 prefixes=(prefix,'/Applications/OpenCodex.app/') if '--include-installed' in sys.argv else (prefix,)
 rows=subprocess.check_output(['ps','-axo','pid=,comm='],text=True).splitlines()
 owned_data=os.path.expanduser('~/Library/Application Support/OpenCodex/')

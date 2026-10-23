@@ -1,7 +1,7 @@
 'use strict';
 const fs=require('node:fs/promises'),path=require('node:path');
 const methods=new Set(['thread/start','thread/resume','thread/fork','thread/shellCommand','turn/start','review/start']);
-function needsLease(method,params){return methods.has(method)||(method==='thread/settings/update'&&params?.cwd!=null)||(method==='mcpServer/tool/call'&&require('./native-mcp.cjs').isProjectedUri(params?._meta?.['opencodex/resourceUri']));}
+function needsLease(method,params){return methods.has(method)||(method==='thread/settings/update'&&['cwd','permissions','sandboxPolicy','approvalPolicy','approvalsReviewer'].some(key=>params?.[key]!=null))||(method==='mcpServer/tool/call'&&require('./native-mcp.cjs').isProjectedUri(params?._meta?.['opencodex/resourceUri']));}
 async function resolveCwd(params,entry,fallback){
  const value=params?.cwd??entry?.localCwd??(typeof entry?.summary?.cwd==='string'&&entry.summary.cwd.startsWith('/')?entry.summary.cwd:fallback);
  if(typeof value!=='string'||!path.isAbsolute(value)||value.includes('\0'))throw Error('請選擇有效的 Mac 專案資料夾。');
@@ -64,4 +64,25 @@ function localResult(result,known,fallback){
  // start/resume/fork return cwd twice. Native automations use the top-level one.
  return {...result,thread,...(Object.hasOwn(result,'cwd')&&thread.cwd?{cwd:thread.cwd}:{})};
 }
-module.exports={methods,needsLease,resolveCwd,acquire,acquireAsync,cancelPending,cancelEphemeral,localThread,localResult};
+async function resume(runtime,params,{entry,check,readThread,request}){
+ const guard=()=>{check();if(runtime.closed||runtime.run)throw Error('對話仍在執行或已斷線，無法重新載入設定。');};
+ guard();
+ if(entry?.summary?.ephemeral===true)throw Error('暫存對話無法重新載入；請建立新的對話。');
+ // A newly created paginated thread has no rollout until the first turn or a
+ // full history read. Persist it through the native history API before resume.
+ if(entry?.emptyHistory===true){
+  const history=await readThread(runtime.rpc,{threadId:params.threadId,includeTurns:true},true);
+  guard();
+  if(history?.thread?.id!==params.threadId)throw Error('重新載入的對話身分不一致。');
+ }
+ // The engine ignores configuration overrides while this connection remains
+ // subscribed. Invalidated admissions must release that subscription first.
+ if(!runtime.openCodexThreads?.has(params.threadId)){
+  await runtime.rpc.request('thread/unsubscribe',{threadId:params.threadId});
+  guard();
+ }
+ const result=await request('thread/resume',params);
+ guard();
+ return result;
+}
+module.exports={methods,needsLease,resolveCwd,acquire,acquireAsync,cancelPending,cancelEphemeral,localThread,localResult,resume};

@@ -6,8 +6,18 @@ function replace(source,before,after){
  return source.replace(before,after);
 }
 function host(source){
+ source=replace(source,'const reason = failure.message;','const reason = failure.message;\n            const customReason = this.openCodexPermissionDispatch?.errorMessage(failure);');
+ source=replace(source,"const detail = code === 'EACCES' ?","const detail = customReason || (code === 'EACCES' ?");
+ source=replace(source,': safe;\n            result({ ...textResult(detail)',': safe);\n            result({ ...textResult(detail)');
+ source=replace(source,'return entry.invoke(call.arguments, controller.signal);','return this.openCodexInvokeTool(entry, call.arguments, controller.signal);');
  source=replace(source,'capabilities: () => ({ ...this.status(), tools: this.listTools().map(tool => ({ name: tool.name, description: tool.description })) })','getRun: () => this.openCodexCurrentRun?.(), capabilities: () => ({ ...this.status(), tools: this.listTools().map(tool => ({ name: tool.name, description: tool.description })) })');
- source=replace(source,'    async stop() {',`    cancelRun(run) {
+ source=replace(source,'    async stop() {',`    openCodexInvokeTool(entry,args,signal) {
+        const invoke=()=>entry.invoke(args,signal),name=entry.tool.name;
+        const client=this.extensionClients.get(entry.extensionId||args?.serverId);
+        return this.openCodexPermissionDispatch ?
+            this.openCodexPermissionDispatch.tool({entry,name,args,signal,client,invoke}) : invoke();
+    }
+    cancelRun(run) {
         if (!run?.requestId) return;
         this.core?.cancel(run.requestId);
         for (const controller of this.active)
@@ -15,7 +25,10 @@ function host(source){
     }
     async stop() {`);
  source=replace(source,'this.options.onActivity?.({ name: call.name, category: call.category, status });','this.options.onActivity?.({ name: call.name, category: call.category, status, ...(controller.openCodexRun ? {requestId:controller.openCodexRun.requestId,threadId:controller.openCodexRun.threadId,turnId:controller.openCodexRun.turnId} : {}) });');
- source=replace(source,'const call = { name: entry.tool.name, arguments: (params.arguments || {}),','const call = { signal: controller.signal, name: entry.tool.name, arguments: (params.arguments || {}),');
+ if(!source.includes('const call = { signal: controller.signal, metadata: params._meta,')){
+  source=replace(source,'const call = { name: entry.tool.name, arguments: (params.arguments || {}),','const call = { signal: controller.signal, name: entry.tool.name, arguments: (params.arguments || {}),');
+  source=replace(source,'const call = { signal: controller.signal, name: entry.tool.name,','const call = { signal: controller.signal, metadata: params._meta, name: entry.tool.name,');
+ }
  source=replace(source,'const value = await Promise.race([work(), cancelled]);',`const execute = async () => {
                 if (!this.openCodexResolveRun) return work();
                 const run = await this.openCodexResolveRun(params._meta, controller.signal);

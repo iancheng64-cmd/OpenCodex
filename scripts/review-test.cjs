@@ -14,7 +14,7 @@ const fs=require('fs'),path=require('path'),os=require('os');
  await new Promise((r,j)=>{ws.onopen=r;ws.onerror=j});
  const call=(method,params={})=>new Promise((resolve,reject)=>{const id=++seq;pending.set(id,{resolve,reject});ws.send(JSON.stringify({id,method,params}));});
  await call('initialize',{clientInfo:{name:'opencodex-review-qa',version:'0.4.1'}});
- const result=await call('review/start',{threadId:originalId,delivery:'detached',target:{type:'custom',instructions:'這是 Mac 執行器審查驗收。請實際使用 mac_fs_read 讀取 /Users/ian/Projects/OpenCodex/evidence/executor-sentinel.txt，檢查其內容是否為 OPENCODEX-MAC-EXECUTOR-20261013-VERIFIED。內容正確就回報沒有發現問題；不要修改檔案，也不要使用網路。'}});
+ const result=await call('review/start',{threadId:originalId,delivery:'detached',target:{type:'custom',instructions:'這是 Mac 執行器審查驗收。請實際使用 mac_fs_read 讀取 '+require('node:path').resolve(__dirname,'../evidence/executor-sentinel.txt')+'，檢查其內容是否為 OPENCODEX-MAC-EXECUTOR-20261013-VERIFIED。內容正確就回報沒有發現問題；不要修改檔案，也不要使用網路。'}});
  if(!turns.has(result.reviewThreadId))await completed;
  const turn=turns.get(result.reviewThreadId);
  const report={version:'0.4.1',at:new Date().toISOString(),originalId,reviewThreadId:result.reviewThreadId,turnId:result.turn.id,status:turn?.status,tools,passed:result.reviewThreadId!==originalId&&turn?.status==='completed'&&tools.some(t=>t.threadId===result.reviewThreadId&&t.tool==='mac_fs_read'&&t.status==='completed')};

@@ -3,12 +3,15 @@
  let state=ipcRenderer.sendSync('opencodex:initial-state'),profiles=[],selected=null,busy=false;
  const listeners=new Set(),isRemote=()=>state?.mode==='ssh'||state?.mode==='bridge';
  const toolsReady=()=>state.sshAgent==='claude'?state.executor===true:state.toolsReady===true;
- const canSubmit=()=>isRemote()&&!state.connecting&&state.connected===true&&toolsReady()&&(state.sshAgent!=='claude'||state.authentication?.status==='authenticated');
+ // A collaborator (peer) connection holds the connection lock but must not block the main composer.
+ const mainConnecting=()=>state.connecting&&!state.peerConnecting;
+ const canSubmit=()=>isRemote()&&!mainConnecting()&&state.connected===true&&toolsReady()&&(state.sshAgent!=='claude'||state.authentication?.status==='authenticated');
+ const guardianAvailable=()=>canSubmit()&&state.sshAgent!=='claude'&&state.guardianAvailable===true;
  const invoke=(name,value)=>ipcRenderer.invoke('opencodex:'+name,value);
  function received(s){const previous=state?.error||state?.diagnostic;if(previous&&previous!==(s.error||s.diagnostic)&&$('oc-error')?.textContent===previous)text('oc-error','');state=s;for(const fn of listeners)fn(canSubmit());if(document.readyState!=='loading')renderStatus();}
  ipcRenderer.on('opencodex:status',(_e,s)=>received(s));
  contextBridge.exposeInMainWorld('openCodexRuntime',{
-  canSubmit,isRemote,isBridge:isRemote,subscribe:fn=>{listeners.add(fn);fn(canSubmit());return()=>listeners.delete(fn);},
+  canSubmit,isRemote,isBridge:isRemote,guardianAvailable,subscribe:fn=>{listeners.add(fn);fn(canSubmit());return()=>listeners.delete(fn);},
   status:()=>invoke('status'),openConnections:()=>openPanel()
  });
  const $=id=>document.getElementById(id),text=(id,v)=>{const e=$(id);if(e&&e.textContent!==v)e.textContent=v;};
@@ -17,30 +20,31 @@
  async function action(fn){if(busy)return;busy=true;renderStatus();text('oc-error','');try{await fn();}catch(e){error(e);}finally{busy=false;renderStatus();}}
  function make(tag,cls,value){const e=document.createElement(tag);if(cls)e.className=cls;if(value!==undefined)e.textContent=value;return e;}
  const icon='<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="3" y="4" width="18" height="15" rx="3"/><path d="m7 8 3 3-3 3m6 0h4"/></svg>';
- async function switchEngine(engine){
-  const current=isRemote()&&state.sshAgent==='claude'?'claude':'codex';
-  if(engine===current)return;
-  await action(async()=>{try{await invoke('mode',{engine});}catch(e){await openPanel();throw e;}});
- }
+ const providers=[['codex','GPT Codex'],['claude','Claude'],['antigravity','Antigravity'],['grok','Grok']];
+ const shared=()=>isRemote()&&!!state.handoff;
+ async function switchEngine(engine){await action(async()=>received(await invoke('handoff-default',{engine})));}
  function mountSidebar(){
   const header=document.querySelector('aside nav[class*="_Navigation_"] > div[class*="_header_"]');
   const rail=document.querySelector('aside nav[class*="sidebar-rail"] [data-appearance="plain"]');
+  const navigation=header?.parentElement;
+  if(navigation){
+   let quota=$('opencodex-sidebar-quota');
+   if(!quota){quota=make('div','oc-quota');quota.id='opencodex-sidebar-quota';quota.dataset.opencodexQuota='';quota.setAttribute('aria-label','所有 AI 帳號剩餘用量');}
+   if(quota.parentElement!==navigation)navigation.append(quota);
+  }
   const target=header||rail;if(!target)return;
   let engines=$('opencodex-engines');
   if(!engines){
-   engines=make('div','oc-engines');engines.id='opencodex-engines';engines.setAttribute('role','group');engines.setAttribute('aria-label','Agent 工作區');
-   for(const [engine,label] of [['codex','GPT Codex'],['claude','Claude Code']]){
-    const b=make('button','oc-engine',label);b.id='opencodex-engine-'+engine;b.type='button';b.onclick=()=>switchEngine(engine);engines.append(b);
-   }
+   engines=make('label','oc-engines');engines.id='opencodex-engines';
+   engines.append(make('span','oc-muted','新對話預設'));
+   const select=make('select','oc-default-provider');select.id='opencodex-default-provider';select.setAttribute('aria-label','新對話預設模型供應商');
+   for(const [engine,label] of providers){const option=make('option','',label);option.value=engine;select.append(option);}
+   select.onchange=()=>switchEngine(select.value);engines.append(select);
   }
   engines.classList.toggle('oc-rail',!header);
   if(engines.parentElement!==target)target.append(engines);
-  const active=isRemote()&&state.sshAgent==='claude'?'claude':'codex';
-  for(const engine of ['codex','claude']){
-   const b=$('opencodex-engine-'+engine),selected=engine===active;
-   b.setAttribute('aria-pressed',String(selected));b.disabled=busy||state.connecting||state.permissionBusy;
-   b.title=selected?'目前工作區':(engine==='codex'?'開啟 GPT Codex':'開啟 Claude Code')+'；重新啟動並保留各自對話';
-  }
+  engines.hidden=!shared()||!header;
+  const select=$('opencodex-default-provider');select.value=state.handoff?.defaultEngine||'codex';select.disabled=busy;
   let button=$('opencodex-ssh');
   if(!button){button=make('button','oc-sidebar');button.id='opencodex-ssh';button.type='button';button.innerHTML=icon+'<span>SSH 連線</span><i aria-hidden="true"></i>';button.setAttribute('aria-haspopup','dialog');button.onclick=openPanel;}
   button.classList.toggle('oc-rail',!header);
@@ -50,7 +54,7 @@
   const toolsPending=isRemote()&&state.connected&&!toolsReady();
   const disconnected=isRemote()&&!state.connected,needsLogin=isRemote()&&state.sshAgent==='claude'&&state.connected&&state.authentication?.status!=='authenticated';
   hint.hidden=!(disconnected||toolsPending||needsLogin)||!header;
-  const label=state.connecting?'正在連線…':toolsPending?'Mac 工具未就緒 · 查看原因':needsLogin?'Claude 登入待確認 · 查看設定':state.error?'連線失敗 · 按此重試':'尚未連線 · 選擇主機';
+  const label=mainConnecting()?'正在連線…':needsLogin?'Claude 登入待確認 · 查看設定':toolsPending?'Mac 工具未就緒 · 查看原因':state.error?'連線失敗 · 按此重試':'尚未連線 · 選擇主機';
   if(hint.textContent!==label)hint.textContent=label;
   if(hint.parentElement!==target)target.append(hint);
   button.dataset.fullAccess=String(isRemote()&&state.fullAccess===true);
@@ -59,32 +63,57 @@
   if(caption&&caption.textContent!==captionText)caption.textContent=captionText;
   button.dataset.connected=String(isRemote()&&state.connected);button.title=isRemote()&&state.connected?'已連線 · '+state.profile:'主機與連線模式';
  }
- function period(min,kind){return min==null?(kind==='primary'?'主要額度':'次要額度'):min%1440===0?min/1440+' 天':min%60===0?min/60+' 小時':min+' 分鐘';}
+ function period(min,kind){return min===10080?'每週':min==null?(kind==='primary'?'主要額度':'次要額度'):min%1440===0?min/1440+' 天':min%60===0?min/60+' 小時':min+' 分鐘';}
  const when=n=>new Date(n).toLocaleString('zh-TW',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
  function renderQuota(){
   for(const slot of document.querySelectorAll('[data-opencodex-quota]')){
-   const q=state.quota||{},signature=JSON.stringify(q);if(slot.dataset.signature===signature)continue;
+   const accounts=state.quotas||[{id:'codex',label:'GPT Codex',...state.quota}],signature=JSON.stringify(accounts);
+   if(slot.dataset.signature===signature)continue;
+   const expanded=new Set([...slot.querySelectorAll('details[open]')].map(e=>e.dataset.provider));
    slot.dataset.signature=signature;slot.className='oc-quota';slot.replaceChildren();
-   const top=make('div','oc-row'),title=make('strong','','使用情況'),refresh=make('button','oc-quiet','更新');
+   const top=make('div','oc-row'),refresh=make('button','oc-quiet','更新');
    refresh.type='button';refresh.onclick=e=>{e.stopPropagation();refresh.disabled=true;invoke('quota').then(received).catch(error).finally(()=>refresh.disabled=false);};
-   top.append(title,refresh);slot.append(top);
-   slot.append(make('div','oc-muted',q.account?.email||(state.sshAgent==='claude'?'遠端 Claude 帳號':'遠端 Codex 帳號')));
-   slot.append(make('div','oc-muted',q.source||'SSH 尚未連線'));
-   if(q.status==='available'||q.quota){
+   top.append(make('strong','','所有 AI 帳號用量'),refresh);slot.append(top);
+   for(const q of accounts){
+    const card=make('details','oc-provider');card.dataset.provider=q.id;card.open=expanded.has(q.id);
+    const summary=make('summary','oc-provider-summary'),heading=make('div','oc-row');
+    const available=q.status==='connected'||q.status==='ready'||q.account?.authenticated===true;
+    heading.append(make('strong','',q.label),make('span','oc-provider-status',q.status==='auth-blocked'?'鑰匙圈需授權':q.status==='auth-unverified'?'登入狀態待確認':q.status==='auth-required'?'登入待確認':q.status==='disconnected'?'未連線':q.error?'查看狀態':available?'已連線':'用量詳情'));
+    const compact=make('div','oc-compact-windows'),windows=(q.quota?.buckets||[]).flatMap(bucket=>['primary','secondary'].flatMap(kind=>bucket[kind]?[{...bucket[kind],bucket:bucket.name,kind}]:[]));
+    if(['codex','claude'].includes(q.id)){
+     for(const [mins,label] of [[300,'5 小時'],[10080,'每週']]){
+      const w=windows.find(w=>w.windowDurationMins===mins);compact.append(make('span','',label+' '+(typeof w?.remainingPercent==='number'?Math.round(w.remainingPercent*10)/10+'%':'未提供')));
+     }
+    }else if(windows.length){
+     compact.append(make('span','',windows.length+' 項模型額度 · 展開查看'));
+    }else compact.append(make('span','',q.status?.startsWith('auth-')?'確認登入後同步模型與額度':'CLI 未提供剩餘額度'));
+    summary.append(heading,compact);card.append(summary,make('div','oc-muted oc-account',q.account?.email||q.account?.authMethod||q.source||'尚未連線'));
     for(const bucket of q.quota?.buckets||[]){
-     if((q.quota?.buckets?.length||0)>1)slot.append(make('strong','oc-bucket',bucket.name));
+     if(bucket.name)card.append(make('strong','oc-bucket',bucket.name));
      for(const kind of ['primary','secondary']){
       const w=bucket[kind];if(!w)continue;
-      const row=make('div','oc-row oc-window'),n=w.remainingPercent;
-      row.append(make('span','',period(w.windowDurationMins,kind)),make('span','',typeof n==='number'?Math.round(n*10)/10+'% 剩餘':'未提供'));
-      slot.append(row);
-      if(typeof n==='number'){const meter=make('progress');meter.max=100;meter.value=n;meter.setAttribute('aria-label',period(w.windowDurationMins,kind)+'剩餘額度');slot.append(meter);}
-      if(w.resetsAt!=null)slot.append(make('div','oc-muted','重置 '+when(w.resetsAt*1000)));
+      const row=make('div','oc-row oc-window'),n=w.remainingPercent,label=w.name||period(w.windowDurationMins,kind);
+      row.append(make('span','',label),make('span','',typeof n==='number'?Math.round(n*10)/10+'% 剩餘':'未提供'));card.append(row);
+      if(typeof n==='number'){const meter=make('progress');meter.max=100;meter.value=n;meter.setAttribute('aria-label',q.label+' '+label+'剩餘額度');card.append(meter);}
+      if(w.resetsAt!=null)card.append(make('div','oc-muted','重置 '+when(typeof w.resetsAt==='number'?w.resetsAt*1000:w.resetsAt)));
      }
     }
+    if(['codex','claude'].includes(q.id))for(const [minutes,label] of [[300,'5 小時'],[10080,'每週']]){
+     const present=(q.quota?.buckets||[]).some(b=>[b.primary,b.secondary].some(w=>w&&w.windowDurationMins===minutes));
+     if(!present){const row=make('div','oc-row oc-window');row.append(make('span','',label),make('span','','未提供'));card.append(row);}
+    }
+    if(q.quota?.raw)card.append(make('pre','oc-usage-raw',q.quota.raw));
+    if(q.status==='auth-required'){
+     card.append(make('div','oc-warning','登入待確認：在伺服器以相同 SSH 使用者執行 '+q.login));
+     if(q.error)card.append(make('div','oc-muted',q.error));
+    }else if(q.error||q.quota?.unavailableReason)card.append(make('div','oc-muted',q.error||q.quota.unavailableReason));
+    else if(q.status==='disconnected')card.append(make('div','oc-muted','尚未連線；主機連線後自動連接'));
+    else if(!q.quota?.buckets?.length&&!q.quota?.raw)card.append(make('div','oc-muted','尚未取得可用額度資料'));
+    if(q.stale&&q.quota?.buckets?.length)card.append(make('div','oc-warning','上次取得的額度，非最新資料'));
+    if(q.quota?.updatedAt)card.append(make('div','oc-muted oc-updated','更新 '+when(q.quota.updatedAt)));
+    slot.append(card);
    }
-   slot.append(make('div','oc-muted oc-updated',q.status==='loading'?'正在讀取帳號與額度…':q.stale?(q.error||(q.status==='disconnected'?'未連線，無法更新額度':'額度資料已過期，正在更新…')):(q.quota?.updatedAt?'更新 '+when(q.quota.updatedAt)+' · 每 30 秒同步':'正在讀取…')));
-   if(q.stale&&q.quota)slot.append(make('div','oc-warning','上次取得的額度，非最新資料'));
+   slot.append(make('div','oc-muted','每 30 秒同步；供應商未公開的額度不會推算。'));
   }
  }
  function renderApprovals(){
@@ -105,16 +134,19 @@
  }
  function renderStatus(){
   mountSidebar();renderQuota();if(!$('oc-connections'))return;renderApprovals();
-  text('oc-status',state.connecting?'正在連線…':isRemote()?(state.connected?'已連線至 '+state.profile:'尚未連線'):state.mode==='official'?'官方登入模式':'自訂 API 模式');
-  text('oc-active-engine',(isRemote()&&state.sshAgent==='claude'?'Claude Code':'GPT Codex')+' 工作區 · 兩種 Agent 各自保留對話與模型');
+  const comp=state.composio||{};
+  text('oc-composio-state',comp.pending?'請在瀏覽器選擇 Composio 帳號並完成授權。':comp.error|| (comp.authenticated?(comp.toolCount!=null?'已連線 · '+comp.toolCount+' 個 MCP 工具，下一回合自動載入。':'已登入 · 按「檢查連線」確認工具。'):'使用瀏覽器登入，授權保存在這台 Mac。'));
+  $('oc-composio-login').disabled=busy||comp.pending;$('oc-composio-check').disabled=busy||!comp.authenticated||comp.pending;
+  text('oc-status',mainConnecting()?'正在連線…':isRemote()?(state.connected?'已連線至 '+state.profile:'尚未連線'):state.mode==='official'?'官方登入模式':'自訂 API 模式');
+  text('oc-active-engine','統一對話 · GPT／Claude／Gemini／Grok 可從輸入框模型選單切換，不需重新啟動。');
   text('oc-runtime',isRemote()&&state.connected?'遠端 '+(state.sshAgent==='claude'?'Claude Code':'Codex')+' '+(state.runtimeVersion||'')+' · 本機工具 '+(toolsReady()?'就緒':'未就緒'):'透過 SSH 使用遠端 '+(state.sshAgent==='claude'?'Claude Code':'Codex')+'，在這台 Mac 執行工具');
   const peers=state.agents?.peers||{},other=state.sshAgent==='claude'?'codex':'claude',peer=peers[other];
   const auth=state.sshAgent==='claude'?state.authentication?.status:peers.claude?.authentication;
   $('oc-agents-section').hidden=!isRemote();
   text('oc-agents-state',state.agents?.activity||['codex','claude'].map(a=>(a==='codex'?'Codex':'Claude')+'：'+(!peers[a]?.connected?'尚未連線':peers[a].host+(a==='claude'&&peers[a].authentication!=='authenticated'?' · 登入待確認':' · 已連線'))).join(' ／ '));
   text('oc-peer-connect','連接協作 '+(other==='claude'?'Claude':'Codex'));
-  $('oc-peer-connect').disabled=busy||state.connecting||state.permissionBusy||!state.connected||!selected;
-  $('oc-peer-disconnect').hidden=!peer?.connected;$('oc-peer-disconnect').disabled=busy||state.connecting||state.permissionBusy;
+  $('oc-peer-connect').disabled=busy||state.connecting||state.peerBusy||!state.connected||!selected;
+  $('oc-peer-disconnect').hidden=!peer?.connected;$('oc-peer-disconnect').disabled=busy||state.connecting||state.peerBusy;
   $('oc-agents-stop').hidden=!state.agents?.busy;
   text('oc-claude-auth-state',!peers.claude?.connected?'連線後檢查遠端 Claude 登入。':auth==='authenticated'?'遠端 Claude 已登入，可開始對話。':auth==='required'?'遠端 Claude 尚未登入。請在該主機以相同 SSH 使用者登入 Claude Code，再重新檢查。':'無法確認遠端 Claude 登入狀態，請重新檢查或核對設定資料夾。');
   $('oc-claude-check').disabled=busy||state.connecting||!peers.claude?.connected;
@@ -171,6 +203,8 @@
   $('oc-close').onclick=escClose;
   panel.addEventListener('close',()=>{$('oc-password').value='';$('oc-apiKey').value='';});
   $('oc-authType').onchange=toggleAuth;$('oc-mode').onchange=toggleMode;$('oc-agent').onchange=toggleMode;
+  $('oc-composio-login').onclick=()=>action(async()=>received(await invoke('composio-login')));
+  $('oc-composio-check').onclick=()=>action(async()=>received(await invoke('composio-check')));
   $('oc-claude-check').onclick=()=>action(async()=>received(await invoke('claude-status')));
   $('oc-new').onclick=()=>{edit(null);$('oc-name').focus();};
   $('oc-save').onclick=()=>action(async()=>{await saveProfile();$('oc-password').value='';text('oc-feedback','主機設定已儲存');});

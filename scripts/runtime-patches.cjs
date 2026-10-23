@@ -2,10 +2,14 @@
 // The remote MCP startup budget is 45 s; inventory must not time out at 30 s.
 function inventoryDeadline(code){
  const before='await runtime.rpc.request("mcpServerStatus/list", { threadId, limit: 100, ...(cursor ? { cursor } : {}) })';
- const after='await runtime.rpc.request("mcpServerStatus/list", { threadId, limit: 100, ...(cursor ? { cursor } : {}) }, 60000).catch(error => { throw new Error("SSH Runtime 工具清單：" + error.message, { cause: error }); })';
- if(code.includes(after)&&!code.includes(before))return code;
- if(!code.includes(before)||code.indexOf(before)!==code.lastIndexOf(before))throw Error('Unrecognized Runtime inventory boundary');
- return code.replace(before,after);
+ const previous='await runtime.rpc.request("mcpServerStatus/list", { threadId, limit: 100, ...(cursor ? { cursor } : {}) }, 60000).catch(error => { throw new Error("SSH Runtime 工具清單：" + error.message, { cause: error }); })';
+ // Isolation checks every server's runtimeStatus and tools. Resource enumeration
+ // adds remote round trips without strengthening the disabled-server requirement.
+ const after=previous.replace('threadId, limit:', 'threadId, detail: "toolsAndAuthOnly", limit:');
+ if(code.includes(after)&&!code.includes(before)&&!code.includes(previous))return code;
+ const source=code.includes(previous)?previous:before;
+ if(!code.includes(source)||code.indexOf(source)!==code.lastIndexOf(source))throw Error('Unrecognized Runtime inventory boundary');
+ return code.replace(source,after);
 }
 function sharedHostTrust(code){
  const before='function trustedHostsPath() { return node_path_1.default.join(electron_1.app.getPath("userData"), "runtime-known-hosts.json"); }';

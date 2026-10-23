@@ -7,7 +7,7 @@ const {rpc,wait}=require('./qa-client.cjs');
 const evidence=path.resolve(__dirname,'../evidence'),output=path.join(evidence,'native-organization-e2e.json');
 fs.mkdirSync(evidence,{recursive:true});
 const fixture=fs.realpathSync(fs.mkdtempSync(path.join(evidence,'organization-qa-')));
-const report={version:'0.4.8',at:new Date().toISOString(),passed:false,fixture,tests:[],createdIDs:{threadIds:[],sectionIds:[],projectIds:[]},deletedIDs:{sectionIds:[],projectIds:[]},scope:'real native JSON-RPC over an already connected GPT SSH instance; UI and restart checks are separate'};
+const report={version:'0.4.10',at:new Date().toISOString(),passed:false,fixture,tests:[],createdIDs:{threadIds:[],sectionIds:[],projectIds:[]},deletedIDs:{sectionIds:[],projectIds:[]},scope:'real native JSON-RPC over an already connected GPT SSH instance; UI and restart checks are separate'};
 const save=()=>fs.writeFileSync(output,JSON.stringify(report,null,2),{mode:0o600});
 save();
 (async()=>{
@@ -76,4 +76,4 @@ save();
   report.expectedOrder=[second.id,first.id];report.passed=true;
  }catch(error){report.error=error.stack||String(error);process.exitCode=1;}
  finally{clearTimeout(watchdog);client?.close();save();console.log(JSON.stringify(report));}
-})().catch(error=>{report.error=error.stack||String(error);save();console.error(report.error);process.exitCode=1;});
+})().catch(error=>{report.error=error.stack||String(error);save();console.error(report.error);process.exitCode=1;}).finally(()=>process.exit(process.exitCode||0));

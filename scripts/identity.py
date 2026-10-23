@@ -4,7 +4,7 @@ root=Path(__file__).resolve().parent.parent
 app=root/'build/OpenCodex.app'
 p=app/'Contents/Info.plist'
 d=plistlib.load(p.open('rb'))
-d.update(CFBundleExecutable='OpenCodex',CFBundleName='OpenCodex',CFBundleDisplayName='OpenCodex',CFBundleIdentifier='io.opencodex.desktop',CFBundleShortVersionString='26.1007.71326',CFBundleVersion='20398',OpenCodexVersion='0.4.8',CFBundleAlternateNames=['OpenCodex'],CrProductDirName='io.opencodex.desktop',CFBundleURLTypes=[{'CFBundleURLName':'OpenCodex','CFBundleURLSchemes':['opencodex']}])
+d.update(CFBundleExecutable='OpenCodex',CFBundleName='OpenCodex',CFBundleDisplayName='OpenCodex',CFBundleIdentifier='io.opencodex.desktop',CFBundleShortVersionString='26.1007.71326',CFBundleVersion='20398',OpenCodexVersion='0.4.11',CFBundleAlternateNames=['OpenCodex'],CrProductDirName='io.opencodex.desktop',CFBundleURLTypes=[{'CFBundleURLName':'OpenCodex','CFBundleURLSchemes':['opencodex']}])
 d['ElectronAsarIntegrity']={'Resources/app.asar':{'algorithm':'SHA256','hash':(root/'build/asar-hash.txt').read_text().strip()}}
 for key in list(d):
  if key.startswith('SU') or key in ['CFBundleDocumentTypes','UTExportedTypeDeclarations','UTImportedTypeDeclarations','LSHasLocalizedDisplayName']:
@@ -38,7 +38,10 @@ subprocess.run(['clang','-O2','-x','objective-c','-framework','Foundation',str(r
 import importlib.util
 spec=importlib.util.spec_from_file_location('stable_signing',root/'scripts/stable-signing.py')
 signing=importlib.util.module_from_spec(spec);spec.loader.exec_module(signing)
+subprocess.run(['clang','-O2','-Wno-deprecated-declarations','-framework','Security',str(root/'src/credential-migrate.c'),'-o',str(app/'Contents/Resources/opencodex-credential-migrate')],check=True)
+signing.sign(app/'Contents/Resources/opencodex-credential-migrate',deep=False)
 signing.sign(app/'Contents/Resources/opencodex-hooks-helper',deep=False)
+signing.sign(app/'Contents/Resources/opencodex-permission-engine',deep=False)
 signing.sign(app,root/'build/entitlements.plist')
 # The deep pass changes unpacked native modules. Hash their final signed bytes,
 # then sign only the framework and outer bundle so those bytes remain sealed.

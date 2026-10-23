@@ -6,10 +6,11 @@ const baseline=archive(original);
 try{if(JSON.parse(baseline.read('package.json')).codexBuildNumber!=='20398')throw Error('ChatGPT native baseline changed. Use refresh-build.cjs for the verified OpenCodex bundle, or port and test every native patch before a full rebuild.');}finally{baseline.close();}
 fs.mkdirSync(path.join(res,'opencodex-ui'),{recursive:true});
 require('./bundle-native-hooks.cjs').bundleNativeHooks(res);
+require('./bundle-permission-engine.cjs').bundlePermissionEngine(res);
 for(const n of ['controls.html','controls.js','controls-preload.cjs'])fs.copyFileSync(path.join(root,'src',n),path.join(res,'opencodex-ui',n));
 function replace(s,a,b){if(!s.includes(a))throw Error('Patch anchor missing: '+a.slice(0,100));if(s.indexOf(a)!==s.lastIndexOf(a))throw Error('Non-unique patch: '+a.slice(0,60));return s.replace(a,b);}
 const a=archive(original),changes={},pkg=JSON.parse(a.read('package.json'));
-pkg.name='opencodex-desktop';pkg.productName='OpenCodex';pkg.main='opencodex/bootstrap.cjs';pkg.openCodexVersion='0.4.8';
+pkg.name='opencodex-desktop';pkg.productName='OpenCodex';pkg.main='opencodex/bootstrap.cjs';pkg.openCodexVersion='0.4.11';
 changes['package.json']=JSON.stringify(pkg,null,2);
 for(const n of fs.readdirSync(path.join(root,'src')))if(n!=='bridge-adapter.cjs'&&n!=='native-preload.cjs')changes['opencodex/'+n]=fs.readFileSync(path.join(root,'src',n));
 let boot=a.read('.vite/build/bootstrap-DOZRFVdo.js').toString();
@@ -32,16 +33,18 @@ const rendererPath='webview/assets/app-primary-2a670e99a60c.js';
 let renderer=a.read(rendererPath).toString();
 renderer=replace(renderer,'fe=q(V),pe;','fe=useOpenCodexBridgeReady(q(V)),pe;');
 renderer+='\nfunction useOpenCodexBridgeReady(localAllowed){const api=window.openCodexRuntime;const [ready,setReady]=P9.useState(()=>api?.canSubmit()===true);P9.useEffect(()=>api?.subscribe(setReady),[]);return api?.isRemote()?ready:localAllowed;}\n';
-changes[rendererPath]=renderer;
+changes[rendererPath]=require('./native-model-patches.cjs').refreshPrimaryModelLabel(renderer);
 // SSH Codex is not a local ChatGPT Work account. Do not wait for a local Work
 // enrollment/policy fetch that requires copying the peer's OAuth token.
 const initialPath='webview/assets/app-initial-1ab6fbe93c4f.js';
 let initial=a.read(initialPath).toString();
 initial=replace(initial,'function Khi(e,{disableExposureLog:t=!1}={}){','function Khi(e,{disableExposureLog:t=!1}={}){if(window.openCodexRuntime?.isBridge())return!1;');
-changes[initialPath]=require('./native-model-patches.cjs').refreshNativeModels(initial);
+changes[initialPath]=require('./native-guardian-patches.cjs').initial(require('./native-model-patches.cjs').refreshNativeModels(initial));
+const sharedPath='webview/assets/app-shared-8340f229c2b3.js';
+changes[sharedPath]=require('./native-steer-patches.cjs').shared(require('./native-guardian-patches.cjs').shared(a.read(sharedPath).toString()));
 const profilePath='webview/assets/profile-dropdown-items-4aea5fc452e5.js';
 let profile=a.read(profilePath).toString();
-profile=replace(profile,'}):null;if(n!=null){let e=n.profileIdentity','}):null;if(window.openCodexRuntime?.isRemote())Hn=(0,$.jsx)(`div`,{\"data-opencodex-quota\":true});if(n!=null){let e=n.profileIdentity');
+profile=replace(profile,'}):null;if(n!=null){let e=n.profileIdentity','}):null;Hn=(0,$.jsx)(`div`,{\"data-opencodex-quota\":true});if(n!=null){let e=n.profileIdentity');
 changes[profilePath]=profile;
 a.close();
 fs.copyFileSync(original,path.join(res,'app.asar'));
@@ -73,12 +76,16 @@ runtime=runtime.replaceAll('process.resourcesPath','node_path_1.default.join(pro
 runtime=require('./runtime-patches.cjs').sharedHostTrust(require('./runtime-patches.cjs').inventoryDeadline(runtime));
 runtime=require('./runtime-patches.cjs').initializationDiagnostics(runtime);
 runtime=require('./subagent-patches.cjs').backend(runtime);
+runtime=require('./permission-patches.cjs').backend(runtime);
 runtime+='\n'+fs.readFileSync(path.join(root,'src/bridge-adapter.cjs'),'utf8');fs.writeFileSync(runtimePath,runtime);
 const claudePath=path.join(out,'dist-main/claude-local-backend.js');fs.writeFileSync(claudePath,require('./claude-patches.cjs').patchClaudeBackend(fs.readFileSync(claudePath,'utf8')));
+const claudeRuntimePath=path.join(out,'dist-main/claude-local-runtime.js');fs.writeFileSync(claudeRuntimePath,require('./claude-patches.cjs').patchClaudeRuntime(fs.readFileSync(claudeRuntimePath,'utf8')));
+const claudeAuthPath=path.join(out,'dist-main/claude-auth-probe.js');fs.writeFileSync(claudeAuthPath,require('./claude-patches.cjs').patchClaudeAuthProbe(fs.readFileSync(claudeAuthPath,'utf8')));
 const executorPath=path.join(out,'dist-main/local-exec-server.js');
 fs.writeFileSync(executorPath,require('./subagent-patches.cjs').executor(fs.readFileSync(executorPath,'utf8')));
 const policyPath=path.join(out,'dist-main/runtime-policy.js');fs.writeFileSync(policyPath,replace(fs.readFileSync(policyPath,'utf8'),'startup_timeout_sec: 20','startup_timeout_sec: 45'));
 for(const n of ['extensions.js','mac-extension-servers.js']){const f=path.join(out,'dist-main',n);fs.writeFileSync(f,fs.readFileSync(f,'utf8').replaceAll('process.env.CODEX_HOME','process.env.OPENCODEX_EXTENSION_HOME').replaceAll('os.environ.get("CODEX_HOME")','os.environ.get("OPENCODEX_EXTENSION_HOME")'));}
+const extensionsPath=path.join(out,'dist-main/extensions.js');fs.writeFileSync(extensionsPath,require('./extension-scan-patches.cjs').extensionScan(fs.readFileSync(extensionsPath,'utf8')));
 for(const n of ['agent-core-tools.js','admin-file-access.js']){const f=path.join(out,'dist-main',n);fs.writeFileSync(f,fs.readFileSync(f,'utf8').replaceAll('process.execPath',`require('node:path').join(process.resourcesPath,'cua_node/bin/node')`));}
 // Native plugin clients retain the existing Mac approval and cancellation path.
 const hostPath=path.join(out,'dist-main/local-tool-host.js');let host=fs.readFileSync(hostPath,'utf8');

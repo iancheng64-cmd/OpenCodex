@@ -2,15 +2,15 @@
 const fs=require('fs'),path=require('path'),assert=require('assert/strict');
 const {rpc}=require('./qa-client.cjs');
 (async()=>{
- const evidence=path.join(__dirname,'../evidence'),report={version:'0.4.8',at:new Date().toISOString(),tests:[]};
+ const evidence=path.join(__dirname,'../evidence'),report={version:'0.4.10',at:new Date().toISOString(),tests:[]};
  let r;
  try{
   const workspace=JSON.parse(fs.readFileSync(path.join(evidence,'native-workspace-e2e.json'),'utf8'));
-  assert.equal(workspace.version,'0.4.8');assert.equal(workspace.passed,true);
+  assert.equal(workspace.version,'0.4.10');assert.equal(workspace.passed,true);
   const fixture=fs.realpathSync(workspace.fixture),root=fs.realpathSync(evidence)+path.sep;
   assert(fixture.startsWith(root+'workspace-qa-'));assert(fs.existsSync(path.join(fixture,'project-marker.txt')));
   assert.equal(typeof workspace.threadA,'string');report.sourceThreadId=workspace.threadA;
-  r=await rpc();await r.call('initialize',{clientInfo:{name:'native-shell-history-qa',version:'0.4.8'}});
+  r=await rpc();await r.call('initialize',{clientInfo:{name:'native-shell-history-qa',version:'0.4.10'}});
   const read=await r.call('thread/read',{threadId:workspace.threadA,includeTurns:true});
   assert.equal(read.thread.cwd,fixture);assert(Array.isArray(read.thread.turns));
   const sourceTurns=read.thread.turns,sourceIds=sourceTurns.map(t=>t.id);
@@ -64,4 +64,4 @@ const {rpc}=require('./qa-client.cjs');
   report.turnCount=sourceIds.length;report.itemCount=items.length;report.passed=true;
  }catch(e){report.passed=false;report.error=e.stack;process.exitCode=1;}
  finally{r?.close();fs.writeFileSync(path.join(evidence,'native-shell-e2e.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));}
-})().catch(e=>{console.error(e.stack);process.exit(1)});
+})().catch(e=>{console.error(e.stack);process.exit(1)}).finally(()=>process.exit(process.exitCode||0));

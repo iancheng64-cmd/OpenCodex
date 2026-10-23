@@ -184,7 +184,7 @@ async function main(){
  const helperConfig=path.join(helperHome,'config.toml'),helperHooks=path.join(helperHome,'hooks.json');
  fs.writeFileSync(helperConfig,'[features]\nhooks=true\n');fs.writeFileSync(helperHooks,JSON.stringify(localHooks));
  const generated=relayConfig({server:'fixture',events:['UserPromptSubmit','SessionStart','Stop'],remoteHooks:[trusted]});
- helperOptions={binary:path.join(root,'build/hooks-target/debug/opencodex-hooks-helper'),cwd:workspace,codexHome:helperHome,nonce:generated.nonce,events:generated.events,
+ helperOptions={binary:process.env.OPENCODEX_HOOKS_HELPER||path.join(root,'build/hooks-target/debug/opencodex-hooks-helper'),cwd:workspace,codexHome:helperHome,nonce:generated.nonce,events:generated.events,
   env:{PATH:process.env.PATH,HOME:temp,CODEX_HOME:helperHome,TMPDIR:temp,LANG:'en_US.UTF-8',ELECTRON_RUN_AS_NODE:'1'}};
  const realThread=await thread(workspace,generated.config,false);
  let modelCount=report.modelRequests.length;

@@ -16,11 +16,12 @@ const tests=[],source=fs.readFileSync(path.join(__dirname,'../src/bootstrap.cjs'
   ['claude:connect',async(_event,input)=>{sent={agent:'claude',input};throw Error('captured connection');}]
  ]);
  let claudeMode=false;
- const context={settings,handlers,codexConnection,claudeConnection,validateProfile,validateCwd,connecting:false,permissionChanging:false,pendingConnection:null,hostConfirmation:null,agents:null,claude:{runtime:null,queue:{starting:false}},runtime:null,peer:null,localTurns:new Set(),nativeShell:{},nativeQueue:{},bridgeError:null,publish:()=>{},save:()=>{if(failSave)throw Error('disk full');writes++},handle:(name,fn)=>registered.set(name,fn),isRemote:()=>true,isClaude:()=>claudeMode,nativePolicy:{resolveMode:()=>({effective:'full'})}};
+ const context={peerReconnect:{cancel(){},schedule(){}},mainReconnect:{cancel(){},schedule(){}},applyPendingDefault(){},settings,handlers,codexConnection,claudeConnection,validateProfile,validateCwd,connectionIntent:0,connecting:false,permissionChanging:false,pendingConnection:null,hostConfirmation:null,agents:null,claude:{runtime:null,queue:{starting:false}},runtime:null,peer:null,handoff:null,localTurns:new Set(),nativeShell:{},nativeQueue:{},bridgeError:null,publish:()=>{},save:()=>{if(failSave)throw Error('disk full');writes++},handle:(name,fn)=>registered.set(name,fn),isRemote:()=>true,isClaude:()=>claudeMode,nativePolicy:{resolveMode:()=>({effective:'full'})}};
  vm.createContext(context);
  vm.runInContext(source.split('\n').find(l=>l.startsWith("handle('opencodex:profile-save',")),context);
  const saveProfile=registered.get('opencodex:profile-save'),executable='C:\\Program Files\\OpenCodex\\codex.exe';
  await saveProfile({}, {...profile,savePassword:true,codexExecutable:executable});
+ assert.equal(context.connectionIntent,1,'Saving a host supersedes a pending automatic connection');
  assert.equal(settings.codexConnections.unit.executable,executable);assert.equal(writes,1);assert.equal(profiles[0].encryptedPassword,saved.encryptedPassword);
  await saveProfile({}, {...profile,savePassword:true});assert.equal(settings.codexConnections.unit.executable,executable);assert.equal(writes,1);
  const prior=settings.codexConnections;failSave=true;await assert.rejects(saveProfile({}, {...profile,codexExecutable:'/new/codex'}),/disk full/);assert.equal(settings.codexConnections,prior);failSave=false;

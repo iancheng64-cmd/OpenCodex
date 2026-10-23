@@ -3,7 +3,7 @@
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),assert=require('node:assert/strict');
 const root=path.resolve(__dirname,'..'),dir=path.join(root,'evidence');
 const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
-const report=JSON.parse(fs.readFileSync(path.join(dir,'native-mcp-gui-e2e.json'))),baseline=JSON.parse(fs.readFileSync(path.join(dir,'release-check-0.4.8.json')));
+const report=JSON.parse(fs.readFileSync(path.join(dir,'native-mcp-gui-e2e.json'))),baseline=JSON.parse(fs.readFileSync(path.join(dir,'release-check-0.4.10.json')));
 const asar=path.join(root,'build/OpenCodex.app/Contents/Resources/app.asar'),digest=sha(fs.readFileSync(asar));
 assert.equal(baseline.passed,true);assert.equal(baseline.asarSHA256,digest);
 assert.equal(report.passed,true);assert.equal(report.phase,'widget-interaction-passed');assert.equal(report.turnStatus,'completed');

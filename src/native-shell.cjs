@@ -28,10 +28,17 @@ class NativeShell {
    if(record.anchor&&anchor<0)continue;
    turns.splice(anchor+1,0,localTurn);
   }
-  return {...thread,turns};
+  // Other locally executed turns (same-thread Claude handoff) share history paging.
+  return (this.extensions||[]).reduce((value,extension)=>extension.merge(value),{...thread,turns});
  }
  // Cursors describe positions, not frozen pages: reversing a cursor sees later updates.
- hasHistory(threadId){return (this.history[threadId]?.length||0)>0;}
+ hasHistory(threadId){return (this.history[threadId]?.length||0)>0||(this.extensions||[]).some(extension=>extension.turns(threadId).length>0);}
+ // Every locally owned turn (Shell cards, Claude handoff) is served from its full local record.
+ localTurns(threadId){
+  const turns=new Map((this.history[threadId]||[]).map(record=>[record.turn.id,record.turn]));
+  for(const extension of this.extensions||[])for(const turn of extension.turns(threadId))turns.set(turn.id,turn);
+  return turns;
+ }
  cursor(scope,position){
   const body=Buffer.from(JSON.stringify({...scope,...position})).toString('base64url');
   return 'ocsh1.'+body+'.'+crypto.createHmac('sha256',this.cursorKey).update(body).digest('base64url');
@@ -102,12 +109,12 @@ class NativeShell {
   const merged=this.merge({id:params.threadId,turns:remoteTurns}).turns;
   let rows;
   if(kind==='turns'){
-   const localIds=new Set((this.history[params.threadId]||[]).map(r=>r.turn.id));
+   const localIds=this.localTurns(params.threadId);
    // A local command has one full native card. Label it full instead of pretending
    // an incomplete command card is the engine's user/assistant summary projection.
    rows=merged.map(turn=>localIds.has(turn.id)?{...turn,items:view==='notLoaded'?[]:turn.items,itemsView:view==='notLoaded'?'notLoaded':'full'}:turn);
   }else{
-   const localRecords=new Map((this.history[params.threadId]||[]).map(r=>[r.turn.id,r]));
+   const localRecords=this.localTurns(params.threadId);
    if(scope.turnId&&!merged.some(t=>t.id===scope.turnId))throw Error('找不到指定的歷史回合。');
    // A global head cursor can seed one turn's item list. Keep global ordering
    // until the cursor boundary is applied, then filter to the requested turn.
@@ -116,8 +123,8 @@ class NativeShell {
    const byTurn=new Map();
    for(const entry of peerRows){const entries=byTurn.get(entry.turnId)||[];entries.push(entry);byTurn.set(entry.turnId,entries);}
    rows=merged.filter(turn=>!filterTurn||turn.id===filterTurn).flatMap(turn=>{
-    const record=localRecords.get(turn.id);
-    return record?record.turn.items.map(item=>({turnId:turn.id,item,startedAtMs:null,completedAtMs:null})):(byTurn.get(turn.id)||[]);
+    const local=localRecords.get(turn.id);
+    return local?local.items.map(item=>({turnId:turn.id,item,startedAtMs:null,completedAtMs:null})):(byTurn.get(turn.id)||[]);
    });
   }
   const key=row=>kind==='turns'?row.id:[row.turnId,row.item.id];

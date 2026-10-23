@@ -9,7 +9,7 @@ const fs=require('fs');
  const focus=await evaluate('(()=>{const e=document.querySelector("[contenteditable=true]");if(!e)return false;e.focus();return true})()');if(!focus)throw Error('Composer absent');
  await call('Input.dispatchKeyEvent',{type:'keyDown',modifiers:4,key:'a',code:'KeyA',windowsVirtualKeyCode:65});
  await call('Input.dispatchKeyEvent',{type:'keyUp',modifiers:4,key:'a',code:'KeyA',windowsVirtualKeyCode:65});
- await call('Input.insertText',{text:process.argv[2]||'請實際使用 Mac 工具讀取 /Users/ian/Projects/OpenCodex/evidence/executor-sentinel.txt，只回覆檔案內容。'});
+ await call('Input.insertText',{text:process.argv[2]||'請實際使用 Mac 工具讀取 '+require('node:path').resolve(__dirname,'../evidence/executor-sentinel.txt')+'，只回覆檔案內容。'});
  await new Promise(r=>setTimeout(r,500));
  console.log(await evaluate('JSON.stringify({composer:document.querySelector("[contenteditable=true]")?.textContent,send:[...document.querySelectorAll("button")].filter(b=>b.getAttribute("aria-label")==="傳送").map(b=>({disabled:b.disabled,label:b.getAttribute("aria-label")}))})'));
  await call('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});

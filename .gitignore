@@ -2,7 +2,9 @@ build/
 *.zip
 *.dmg
 node_modules/
+/vendor/agentbridge/node_modules
 .DS_Store
 *.log
 evidence/
 research/
+scripts/__pycache__/

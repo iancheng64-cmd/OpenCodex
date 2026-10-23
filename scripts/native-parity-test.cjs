@@ -17,6 +17,32 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve
   assert.equal((await specs[1].createClient().resource('resources/templates/list',{})).resourceTemplates.length,1);
   owner.close();
  });
+ await test('native tool calls refresh only their own server without listing resources',async()=>{
+  const owner=new NativeTools({}),calls=[];owner.threadId='thread';owner.ready=async()=>[];
+  owner.rpc={request:async(method,params)=>{calls.push({method,params});return method==='mcpServerStatus/list'?{data:[{name:'node',runtimeStatus:'connected',tools:{js:{}}}]}:{content:[{type:'text',text:'executed'}]};},close(){}};
+  assert.equal((await owner.callOwn('node','js',{})).content[0].text,'executed');
+  assert.deepEqual(calls[0],{method:'mcpServerStatus/list',params:{threadId:'thread',limit:100,serverName:'node',detail:'toolsAndAuthOnly'}});
+  assert.equal(calls[1].method,'mcpServer/tool/call');assert.equal(calls[1].params.threadId,'thread');
+  owner.close();
+ });
+ await test('native tools still reject disabled servers and removed tools after a refresh',async()=>{
+  for(const entry of [{name:'node',runtimeStatus:'disabled',tools:{js:{}}},{name:'node',runtimeStatus:'connected',tools:{}}]){
+   const owner=new NativeTools({});owner.ready=async()=>[];owner.rpc={request:async method=>{assert.equal(method,'mcpServerStatus/list');return {data:[entry]};},close(){}};
+   await assert.rejects(owner.callOwn('node','js',{}),/已停用或無法使用/);owner.close();
+  }
+ });
+ await test('cancelled native calls do not initialize or inspect a plugin',async()=>{
+  const owner=new NativeTools({});owner.ready=()=>assert.fail('cancelled call started a host');
+  const abort=new AbortController();abort.abort();await assert.rejects(owner.callOwn('node','js',{},abort.signal),/取消/);owner.close();
+ });
+ await test('native inventory keeps resource catalogues and uses one pagination deadline',async()=>{
+  const owner=new NativeTools({}),calls=[];owner.threadId='thread';
+  owner.rpc={request:async(method,params)=>{calls.push(params);return calls.length===1?{data:[{name:'resources',resources:[{uri:'test://one'}]}],nextCursor:'1'}:{data:[{name:'templates',resourceTemplates:[{uriTemplate:'test://{id}'}]}]};},close(){}};
+  const inventory=await owner.inventory();assert.equal(inventory.length,2);assert.equal(inventory[0].resources[0].uri,'test://one');
+  assert.equal(calls[0].detail,undefined);assert.equal(calls[0].serverName,undefined);assert.equal(calls[1].cursor,'1');
+  let count=0;owner.rpc.request=async()=>{count++;await new Promise(r=>setTimeout(r,20));return {data:[],nextCursor:'next'};};
+  await assert.rejects(owner.inventory(10),/逾時/);assert.equal(count,1);owner.close();
+ });
  await test('capabilities and realtime voices use the same remote provider as inference',async()=>{
   assert(routing.reads.has('modelProvider/capabilities/read'));assert(routing.reads.has('thread/realtime/listVoices'));
  });
@@ -107,18 +133,20 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve
  const temp=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'opencodex-parity-')));
  try{
   const a=path.join(temp,'a'),b=path.join(temp,'b');fs.mkdirSync(a);fs.mkdirSync(b);
-  const calls=[],runtime={closed:false,localCwd:a,permissionMode:'project',snapshot:{profileId:'p'},rpc:{request:async(m,p)=>{
+  const calls=[],runtime={closed:false,localCwd:a,permissionMode:'project',openCodexThreads:new Set(['t']),snapshot:{profileId:'p'},rpc:{request:async(m,p)=>{
    calls.push([m,p]);if(m==='thread/start')return {thread:{id:'new',cwd:'C:\\peer'},cwd:'C:\\peer'};
    return {};
   }}};
-  const adapter={exports:{},runtimes:new Map()};vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../src/bridge-adapter.cjs'),'utf8'),adapter);
+  const adapter={exports:{},runtimes:new Map(),require:id=>require(path.join(__dirname,'../src',path.basename(id)))};vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../src/bridge-adapter.cjs'),'utf8'),adapter);
   const ws={readyState:1};
   const context={clients:new Set([ws]),isRemote:()=>true,isClaude:()=>false,runtime,settings:{cwd:a,permissionMode:'project'},known:{t:{profile:'p',localCwd:a,summary:{id:'t',cwd:a}}},
-   routing,workspace,nativePolicy:policy,pendingPermissions:new WeakMap(),organization:new (require('../src/native-organization.cjs').NativeOrganization)(path.join(temp,'organization.json')),nativeQueue:{starting:false,pause:()=>{}},nativeShell:new (require('../src/native-shell.cjs').NativeShell)({file:path.join(temp,'shell-history.json')}),
+   guardianRuntime:require('../src/native-guardian-runtime.cjs'),routing,workspace,nativePolicy:policy,pendingPermissions:new WeakMap(),organization:new (require('../src/native-organization.cjs').NativeOrganization)(path.join(temp,'organization.json')),nativeQueue:{starting:false,pause:()=>{}},nativeShell:new (require('../src/native-shell.cjs').NativeShell)({file:path.join(temp,'shell-history.json')}),
    bridge:{selectWorkspace:async(rt,cwd)=>{rt.localCwd=cwd;},runtimeDependencies:{}},
-   backend:adapter.exports,handlers:new Map(),permissionChanging:false,agents:null,fs,knownFile:path.join(temp,'known.json'),remoteThreadCache:new Map(),
+   backend:adapter.exports,handlers:new Map(),permissionChanging:false,agents:null,handoff:null,NativeHandoff:require('../src/native-handoff.cjs').NativeHandoff,localTurns:new Set(),fs,knownFile:path.join(temp,'known.json'),remoteThreadCache:new Map(),
    audit:()=>{},publish:()=>{},save:()=>{},localRequest:()=>{throw Error('unexpected local route');}};
   const code=fs.readFileSync(path.join(__dirname,'../src/bootstrap.cjs'),'utf8');
+  vm.runInNewContext(code.slice(code.indexOf('function permissionSnapshot('),code.indexOf('function attach(')),context);
+  vm.runInNewContext(code.slice(code.indexOf('function nativeAppContext('),code.indexOf('const nativeConfigMutations=')),context);
   vm.runInNewContext(code.slice(code.indexOf('async function request(ws,'),code.indexOf('function openManager()')),context);
   await test('thread/settings/update moves the Mac executor, preserves model and strips Mac cwd from remote request',async()=>{
    await context.request(ws,'thread/settings/update',{threadId:'t',cwd:b,model:'chosen'});
@@ -155,9 +183,10 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve
    const original=runtime.rpc.request,gate=deferred();runtime.permissionMode='project';
    runtime.rpc.request=async()=>gate.promise;
    const first=context.request(ws,'thread/settings/update',{threadId:'t',permissions:':danger-full-access'});
-   await Promise.resolve();await Promise.resolve();
+   const deadline=Date.now()+2000;
+   while(!context.pendingPermissions.get(runtime)?.has('t')){assert(Date.now()<deadline,'permission update did not reach the peer');await new Promise(r=>setTimeout(r,5));}
    assert.equal(context.pendingPermissions.get(runtime).get('t').requested,'full');
-   await assert.rejects(context.request(ws,'thread/settings/update',{threadId:'t',permissions:':read-only'}),/正在更新/);
+   await assert.rejects(context.request(ws,'thread/settings/update',{threadId:'t',permissions:':read-only'}),/正在更新|執行/);
    assert.equal(runtime.permissionMode,'full');gate.resolve({sandbox:{type:'dangerFullAccess'}});await first;
    assert.equal(context.known.t.permissionMode,'full');assert.equal(context.pendingPermissions.get(runtime).size,0);
    runtime.rpc.request=original;
@@ -170,13 +199,44 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve
    const params={threadId:'t',server:'mac',tool:'click',arguments:{},_meta:{'opencodex/resourceUri':uri}};
    let called=false;runtime.toolHost={openCodexMcpToolCall:async(p,options)=>{called=true;assert.equal(p,params);assert(options.isAuthorized());assert.equal(runtime.localCwd,b);assert(runtime.openCodexPreparing);return {content:[]};}};
    assert.deepEqual(await context.request(ws,'mcpServer/tool/call',params),{content:[]});assert(called);assert.equal(runtime.openCodexPreparing,null);
-   runtime.toolHost.openCodexMcpToolCall=async(p,{signal,isAuthorized})=>new Promise((resolve,reject)=>{signal.addEventListener('abort',()=>{assert.equal(isAuthorized(),false);reject(Error('app aborted'));},{once:true});});
+   const entered=deferred();
+   runtime.toolHost.openCodexMcpToolCall=async(p,{signal,isAuthorized})=>new Promise((resolve,reject)=>{signal.addEventListener('abort',()=>{assert.equal(isAuthorized(),false);reject(Error('app aborted'));},{once:true});entered.resolve();});
    const pending=context.request(ws,'mcpServer/tool/call',params);
-   while(!runtime.openCodexPreparing)await new Promise(r=>setTimeout(r,1));
-   await new Promise(r=>setTimeout(r,10));
+   let enterTimer;
+   try{await Promise.race([entered.promise,new Promise((_,reject)=>{enterTimer=setTimeout(()=>reject(Error('app tool did not start')),5000);})]);}finally{clearTimeout(enterTimer);}
    await context.request(ws,'turn/interrupt',{threadId:'t'});await assert.rejects(pending,/app aborted/);assert.equal(runtime.openCodexPreparing,null);
    await assert.rejects(context.request(ws,'mcpServer/tool/call',{...params,server:'foreign'}),/不屬於/);
    delete context.settings.fullAccess;
+  });
+  await test('peer working directories in settings snapshots never reach the renderer',async()=>{
+   const n=policy.localSnapshot({threadId:'t',threadSettings:{cwd:'C:\\Users\\peer',model:'gpt-6',sandbox:{type:'readOnly'}}},{requested:'project',effective:'project',reviewer:'user'},a);
+   assert.equal(n.threadSettings.cwd,a);assert.equal(n.threadSettings.model,'gpt-6');
+   assert.equal(policy.localSnapshot({cwd:'C:\\Users\\peer',model:'x'},'project',a).cwd,a);
+   assert.equal(policy.localSnapshot({cwd:'C:\\Users\\peer'},'project',null).cwd,'C:\\Users\\peer','without a Mac root nothing is invented');
+  });
+  await test('same-thread Claude handoff lists Claude models, routes Claude turns and never forwards Claude ids to Codex',async()=>{
+   const started=[],flushed=[],original=runtime.rpc.request;
+   context.handoff={isModel:model=>String(model||'').startsWith('opencodex-claude:'),owner:()=>({provider:'claude'}),selectionOnly:()=>false,selectedEffort:()=>null,busy:false,connected:true,running:()=>false,interrupt:async()=>false,selectedModel:()=>null,codexTurn:()=>{},configWrite:()=>null,requested:p=>p?.model||null,started:(_m,r)=>r,readConfig:r=>r,
+    listModels:r=>({...r,data:[...(r.data||[]),{model:'opencodex-claude:claude-opus-5-5'}]}),
+    start:async(p,o)=>{started.push([p,o]);return {turn:{id:'claude-turn'}};},
+    selection:(m,p)=>m==='turn/start'?p?.model:null,strip:(_m,p)=>{if(!p)return p;const {model,...rest}=p;return String(model).startsWith('opencodex-claude:')?rest:p;},flush:async id=>{flushed.push(id);}};
+   try{
+    runtime.rpc.request=async(m,p)=>{calls.push([m,p]);return m==='model/list'?{data:[{model:'gpt-6'}],nextCursor:null}:{};};
+    const list=await context.request(ws,'model/list',{});assert.deepEqual(list.data.map(m=>m.model),['gpt-6','opencodex-claude:claude-opus-5-5']);
+    const before=calls.length,turn=await context.request(ws,'turn/start',{threadId:'t',model:'opencodex-claude:claude-opus-5-5',input:[]});
+    assert.equal(turn.turn.id,'claude-turn');assert.equal(started[0][1].cwd,context.known.t.localCwd);assert.equal(calls.length,before,'a Claude turn must not reach Codex');
+    runtime.run={};await assert.rejects(context.request(ws,'turn/start',{threadId:'t',model:'opencodex-claude:claude-opus-5-5',input:[]}),/目前回合尚未結束/);runtime.run=null;
+    runtime.openCodexPreparing={ephemeral:true,threadId:'title'};await context.request(ws,'turn/start',{threadId:'t',model:'opencodex-claude:claude-opus-5-5',input:[]});assert.equal(started.length,2,'an ephemeral title thread must not block the first Claude turn');
+    runtime.openCodexPreparing={ephemeral:true,threadId:'t'};await assert.rejects(context.request(ws,'turn/start',{threadId:'t',model:'opencodex-claude:claude-opus-5-5',input:[]}),/目前回合尚未結束/);runtime.openCodexPreparing=null;
+    await context.request(ws,'thread/settings/update',{threadId:'t',model:'opencodex-claude:claude-opus-5-5'});
+    assert.equal(calls.at(-1)[0],'thread/settings/update');assert.equal('model' in calls.at(-1)[1],false);
+    let selected=null;context.handoff.selection=(m,p)=>p.model||p.collaborationMode?.settings?.model||(m==='turn/start'?selected:null);
+    context.handoff.strip=(_m,p)=>{if(!p)return p;const v=p.model||p.collaborationMode?.settings?.model;if(p.threadId&&v)selected=v.startsWith('opencodex-claude:')?v:null;const n={...p};if(String(n.model).startsWith('opencodex-claude:'))delete n.model;if(String(n.collaborationMode?.settings?.model).startsWith('opencodex-claude:'))delete n.collaborationMode;return n;};
+    await context.request(ws,'turn/start',{threadId:'t',input:[],collaborationMode:{mode:'default',settings:{model:'opencodex-claude:claude-opus-5-5'}}});assert.equal(started.at(-1)[0].model,'opencodex-claude:claude-opus-5-5');
+    await context.request(ws,'thread/settings/update',{threadId:'t',model:'opencodex-claude:claude-opus-5-5'});
+    const count=started.length;await context.request(ws,'turn/start',{threadId:'t',input:[]});assert.equal(started.length,count+1,'a model chosen by settings update must route the next turn to Claude');
+    context.known.u={profile:'other'};await assert.rejects(context.request(ws,'turn/start',{threadId:'u',model:'opencodex-claude:claude-opus-5-5',input:[]}),/不屬於/);delete context.known.u;
+   }finally{runtime.rpc.request=original;context.handoff=null;}
   });
   await test('automation receives a Mac cwd in both locations and can start its next native step',async()=>{
    const original={thread:{id:'new',cwd:'C:\\peer'},cwd:'C:\\peer',model:'chosen'};

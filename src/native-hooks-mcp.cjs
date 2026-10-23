@@ -6,12 +6,26 @@ const {routeNativeRequest}=require('./native-request.cjs');
 class NativeHooksMcp{
  constructor({record,runtime,binary,env,AppServerRpc,onRequest,Tools=NativeTools}){
   Object.assign(this,{record,runtime,onRequest});this.closed=false;
+  this.permission=runtime.openCodexPermissions;this.permissionMode=runtime.permissionMode||'project';
+  const custom=this.permissionMode.startsWith('custom:');
+  if(custom?(!this.permission?.valid()||this.permission.profile!==this.permissionMode.slice(7)):!!this.permission)throw Error('MCP Hook 的權限工作階段未就緒。');
+  if(custom){
+   const options=this.permission.options;
+   if(!options?.binary||!options.AppServerRpc)throw Error('MCP Hook 的自訂權限引擎未就緒。');
+   ({binary,env,AppServerRpc}=options);
+  }
   this.tools=new Tools({binary,cwd:record.plan.cwd,env,AppServerRpc,config:{'features.hooks':false},
+   ...(custom?{permissionProfile:this.permission.profile}:{}),
+   validate:async()=>{if(!this.permissionCurrent())return false;await this.permission?.validate();return this.permissionCurrent();},
    onRequest:(message,rpc,host)=>{
-    const active=this.active;if(!active?.authorized()||active.owner.run.cancelled)return false;
+    const active=this.active;if(!this.permissionCurrent()||!active?.authorized()||active.owner.run.cancelled)return false;
     const routed=routeNativeRequest(message,host.threadId,active.owner.run);
     return routed?onRequest?.(routed,rpc,{run:active.owner.run,owner:runtime}):false;
    }});
+ }
+ permissionCurrent(){
+  return !this.closed&&!this.runtime.closed&&(this.runtime.permissionMode||'project')===this.permissionMode&&
+   this.runtime.openCodexPermissions===this.permission&&(!this.permission||this.permission.valid());
  }
  async call(call,signal,active){
   if(this.closed||this.active||signal?.aborted||!active?.authorized())throw Error('MCP Hook owner ended or busy');
@@ -20,7 +34,7 @@ class NativeHooksMcp{
   if(typeof call.server!=='string'||typeof call.tool!=='string')throw Error('Invalid MCP Hook tool');
   const control=new AbortController(),abort=()=>{control.abort();this.tools.reset();};
   signal?.addEventListener('abort',abort,{once:true});this.active=active;this.control=control;
-  const valid=()=>{if(this.closed||control.signal.aborted||!active.authorized())throw Error('MCP Hook owner ended');};
+  const valid=()=>{if(!this.permissionCurrent()||control.signal.aborted||!active.authorized())throw Error('MCP Hook owner ended');};
   try{
    valid();await this.tools.ready();valid();
    const inventory=await this.tools.inventory();valid();

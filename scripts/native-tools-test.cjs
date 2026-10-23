@@ -3,11 +3,15 @@ const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),asse
 const {NativeTools}=require('../src/native-tools.cjs');
 const root=path.resolve(__dirname,'..'),res=path.join(root,'build/OpenCodex.app/Contents/Resources');
 const {AppServerRpc}=require(path.join(root,'vendor/agentbridge/dist-main/app-server-rpc.js'));
-const owner=new NativeTools({binary:path.join(res,'codex-cli/CodexCLI.app/Contents/MacOS/codex'),cwd:root,env:{...process.env,CODEX_HOME:path.join(os.homedir(),'Library/Application Support/OpenCodex/codex-official')},AppServerRpc});
+const owner=new NativeTools({binary:path.join(res,'opencodex-permission-engine'),cwd:root,env:{...process.env,CODEX_HOME:path.join(os.homedir(),'Library/Application Support/OpenCodex/codex-official')},AppServerRpc});
 (async()=>{
  const out={version:'0.4.1',at:new Date().toISOString(),tests:[]};
  try{
   const specs=await owner.specs();out.servers=owner.statuses;console.log(JSON.stringify({servers:out.servers}));
+  const storageConfig=await owner.rpc.request('config/read',{cwd:root});
+  assert.equal(storageConfig.config.cli_auth_credentials_store,'file');
+  assert.equal(storageConfig.config.mcp_oauth_credentials_store,'file');
+  out.tests.push('native auth and MCP OAuth use file storage without keychain fallback');
   assert(!out.servers.some(s=>s.status==='starting'),'Startup must finish before publishing native tools');
   assert(specs.some(s=>s.id==='opencodex-native:cua_repl'),'Enabled native Computer Use plugin must not be omitted during startup');
   out.tests.push('native plugin startup completes before catalogue is published');
