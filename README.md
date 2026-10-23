@@ -1,26 +1,28 @@
-# OpenCodex 0.4.11 · 預覽版
+# OpenCodex 0.4.12 · 預覽版
 
 OpenCodex 是 macOS 上的獨立 AI 工作介面：保留原生對話、側邊欄與模型選單，讓同一個對話接續使用 Codex、Claude Code、Antigravity CLI 與 Grok CLI。模型可以在 SSH 伺服器運行，檔案與工具則透過已授權的 Mac 執行端工作。
 
 這是非官方修改版，與 OpenAI、Anthropic、Google、xAI、Cursor 均無官方合作關係。介面基於固定版本的原生封裝，並非從零實作的開源 ChatGPT，也不代表支援所有 ChatGPT 雲端功能。第三方程式仍受各自授權條款約束；本儲存庫沒有授予原廠程式的再散布權。
 
-**0.4.11 為預覽版。** 實機驗收涵蓋 GPT ↔ Grok 切換、前文交接、Mac 工具、停止操作、模型選單及 Composio。Claude 和 Antigravity 的伺服器授權尚待處理，實際生成與逐模型額度未完成實機驗收。完整回歸缺少 11 個舊版進階情境，仍為未通過；詳見下方驗證範圍。
+**0.4.12 為預覽版。** 實機驗收涵蓋 GPT ↔ Grok 切換、前文交接、Mac 工具、引導、排定模型快照、停止操作、模型選單及 Composio。Antigravity 已驗證 14 個模型可列出，並透過 Gemini 完成實際回覆。Claude 的 SSH 憑證授權仍待處理，實際生成尚未通過；逐模型額度只顯示供應商確實提供的資料。完整回歸缺少 11 個舊版進階情境，仍為未通過；詳見下方驗證範圍。
 
 ## 安裝與更新
 
-1. 從本專案 Releases 下載 `OpenCodex-0.4.11.dmg`；同版提供來源 ZIP、SHA-256 及驗證 JSON。
+1. 從本專案 Releases 下載 `OpenCodex-0.4.12.dmg`；同版提供來源 ZIP、SHA-256 及驗證 JSON。
 2. 關閉原有 OpenCodex，開啟 DMG，將 `OpenCodex.app` 拖到 Applications。
 3. 啟動後在設定加入 SSH 主機、使用者、認證方式與本機專案資料夾。
 4. 首次連線核對 SSH 指紋；依工具需要授予 macOS 輔助使用、螢幕錄製或檔案存取權限。
 
 目前使用固定本機簽署身分，尚無 Apple Developer ID 公證。如果 macOS 阻擋首次開啟，在確認來源與雜湊後，使用「系統設定 → 隱私權與安全性 → 仍要打開」。不需要停用 Gatekeeper、SIP、FileVault 或整個鑰匙圈。簽章驗證通過不等於 Apple 公證通過。
 
-需求：Apple Silicon Mac、SSH 伺服器、各供應商 CLI 與有效帳號。模型權限與服務條件仍由供應商決定。私有儲存庫的 Release 只能由獲授權成員下載。
+需求：Apple Silicon Mac、SSH 伺服器、各供應商 CLI 與有效帳號。模型權限與服務條件仍由供應商決定。本儲存庫與 Release 為公開下載。
 
 ## 同一對話切換模型
 
 - 從輸入框的原生模型選單切換 GPT、Claude、Antigravity 模型或 Grok，不需重開 App。
-- 工作進行中可以選擇下一個模型，在下一回合生效。要立即交接，先按停止，再送出下一則訊息。
+- 工作進行中可直接選模型與思考強度，再用「引導」送出：切換模型時會先中止舊回合，再由新模型接續；同模型依供應商能力引導或重新接續。
+- 「排定」保存按下送出當下的模型與思考強度；之後繼續改選單，不會改動已排定訊息。
+- Grok 思考強度依由低到高排列，選單顯示與送出的值一致。供應商不支援的強度不會假稱已啟用。
 - 「停止」永遠送給目前工作的供應商，不會誤送給剛選的新模型。
 - 側邊欄「新對話預設」設定新對話供應商；目前對話使用自己的模型設定。
 - 可見前文會交接給下一個供應商，受上下文長度限制；不搬移另一家模型的內部推理、未完成程序或所有工具隱藏狀態。
@@ -46,13 +48,15 @@ OpenCodex 是 macOS 上的獨立 AI 工作介面：保留原生對話、側邊�
 登入鑰匙圈、個別項目的存取控制，以及 SSH 是否能顯示授權視窗，是不同的檢查。SSH 公鑰登入成功不代表鑰匙圈已解鎖。
 
 1. 在 Mac mini 桌面登入與 SSH 相同的系統帳號。
-2. 開啟「鑰匙圈存取」，選「登入」鑰匙圈；若鎖定，使用該 Mac 帳號密碼解鎖。密碼只在那台 Mac 的系統視窗輸入。
-3. 若 Claude 仍被拒絕，檢查 `Claude Code-credentials` 的「存取控制」，只授權你確認過的 Claude CLI，不要設成所有應用程式皆可讀取。
-4. 回 SSH 執行 `claude auth status --json`，再按 OpenCodex 用量區的「更新」。
+2. 開啟「鑰匙圈存取」，選「登入」鑰匙圈；舊版 macOS 可在終端機執行 `open "/System/Applications/Utilities/Keychain Access.app"`。若鎖定，使用該 Mac 帳號密碼解鎖。密碼只在那台 Mac 的系統視窗輸入。
+3. 若 Claude 仍被拒絕，檢查 `Claude Code-credentials` 的「存取控制」，授權實際使用的 Claude CLI。Antigravity 的登入項目可能是服務名稱 `gemini`、帳號 `antigravity`，應確認後再調整。
+4. 回 SSH 執行 `claude auth status` 與 `agy models`，確認登入狀態，再按 OpenCodex 用量區的「更新」。不同 CLI 版本的參數可能不同；本版遇到不支援 `--json` 的 Claude CLI 時會改試無此旗標的指令，只信任結構化登入結果。
 
 本版將「憑證存在、SSH 無法讀取」標成**鑰匙圈需授權**。探測憑證時不將內容寫入輸出或日誌。如果授權視窗只能在桌面出現，必須在桌面確認，App 無法代替 macOS 授權。
 
-可以在「登入鑰匙圈設定」調整閒置或睡眠自動鎖定，但不保證解除個別項目存取控制。不要刪除鑰匙圈或停用整套保護。
+希望這兩個 AI 不再跳出存取提示時，可在確認項目後，於其「存取控制」選擇允許所有應用程式存取該項目。這會讓其他本機程式也能讀取這兩筆 AI 憑證，且仍需由 macOS 核准；它不會解除登入鑰匙圈本身的鎖定，也不影響其他密碼。
+
+可以在「登入鑰匙圈設定」調整閒置或睡眠自動鎖定，但不保證解除個別項目存取控制。無須刪除整個鑰匙圈。
 
 Antigravity 另行判斷：若 `agy models` 仍要求驗證，憑證可能到期或無法更新。以相同 SSH 使用者重新執行 `agy`，開啟它提供的 URL 登入，再將驗證碼回填 CLI。**不會因 Claude 鑰匙圈出錯，就把 Antigravity 判成相同原因。**
 
@@ -120,6 +124,8 @@ node scripts/release-check.cjs
 node scripts/claude-auth-probe-test.cjs
 node scripts/native-claude-test.cjs
 node scripts/unified-providers-test.cjs
+node scripts/selection-flow-test.cjs
+node scripts/native-config-mutations-test.cjs
 node scripts/composio-test.cjs
 ```
 
@@ -133,6 +139,6 @@ Release 的 verification JSON 綁定 App ASAR、測試來源及下載產物雜�
 
 先前引擎建置的部分來源對應與原廠 App 基準檔也缺失。來源 ZIP 附現存引擎來源封存與雜湊，但不把目前雜湊當成遺失的歷史證明；不宣稱來源封存與保留二進位檔具完整可重現對應，也不宣稱重驗原廠 App 歷史基準。
 
-Claude 實機目前是 macOS 拒絕 SSH 存取已存在的憑證；Antigravity CLI 回報需要驗證。隔離測試覆蓋錯誤分類及恢復，沒有把兩者算成已成功連線或生成。修復授權後仍需補做實機驗收。
+Antigravity 已在相同 SSH 使用者環境恢復登入，實機驗證列出 14 個模型，並透過 OpenCodex 使用 Gemini 完成回覆；此驗收綁定本版 ASAR。Claude 目前仍是 macOS 拒絕 SSH 存取已存在的憑證；隔離測試覆蓋錯誤分類及恢復，但尚未計入 Claude 實際生成通過。
 
 變更詳見 [CHANGELOG.md](CHANGELOG.md)。

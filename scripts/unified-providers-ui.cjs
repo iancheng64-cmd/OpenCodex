@@ -1,11 +1,11 @@
 'use strict';
 // Inspect the actual native renderer; no simulated DOM or provider credentials.
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),assert=require('node:assert/strict');
-const {cdp,pause,wait}=require('./qa-client.cjs'),root=path.resolve(__dirname,'..');
-const report={version:'0.4.11',at:new Date().toISOString(),passed:false,checks:{}};
-let c;
+const {cdp,rpc,pause,wait}=require('./qa-client.cjs'),root=path.resolve(__dirname,'..');
+const report={version:'0.4.12',at:new Date().toISOString(),passed:false,checks:{}};
+let c,r;
 (async()=>{
- c=await cdp();
+ c=await cdp();r=await rpc();await r.call('initialize',{clientInfo:{name:'unified-providers-ui',version:'1'}});
  report.asarSHA256=crypto.createHash('sha256').update(fs.readFileSync(path.join(root,'build/OpenCodex.app/Contents/Resources/app.asar'))).digest('hex');
  const epoch=await c.evaluate('performance.timeOrigin');
  await c.evaluate("document.querySelector('#oc-close')?.click()");
@@ -26,13 +26,26 @@ let c;
  // A new unsent draft avoids altering a user's existing conversation or consuming a model turn.
  await c.evaluate("[...document.querySelectorAll('button')].find(e=>e.innerText==='新對話')?.click()");
  await pause(400);
- for(const [label,expected] of [['Grok · Grok 4.7 Fast','Grok'],['6.1 Sol','6.1']]){
+ for(const [label,expected,model] of [['Grok · Grok 4.7 Fast','Grok','opencodex-grok:grok-4.7-build-fast'],['6.1 Sol','6.1','gpt-6.1-sol']]){
   await c.evaluate("document.querySelector('[data-codex-intelligence-trigger]').click()");
   const expression="[...document.querySelectorAll('[role=menuitemradio]')].find(e=>e.innerText==="+JSON.stringify(label)+")";
   await wait(()=>c.evaluate("!!("+expression+")"),10000);
   assert.equal(await c.evaluate("("+expression+").getAttribute('aria-disabled')"),null);
   await c.evaluate("("+expression+").click()");await escape();
   await wait(()=>c.evaluate("document.querySelector('[data-codex-intelligence-trigger]').innerText.includes("+JSON.stringify(expected)+")"),15000);
+  await wait(async()=>(await r.call('config/read')).config.model===model,15000);
+  if(model.startsWith('opencodex-grok:')){
+   await c.evaluate("document.querySelector('[data-codex-intelligence-trigger]').click()");
+   await wait(()=>c.evaluate("!!document.querySelector('[data-reasoning-slider] [role=slider]')"),10000);
+   const arrow=async(key,code)=>{await c.evaluate("document.querySelector('[data-reasoning-slider]').focus()");for(const type of ['keyDown','keyUp'])await c.call('Input.dispatchKeyEvent',{type,key,code:key,windowsVirtualKeyCode:code});await pause(250);};
+   for(let i=0;i<3;i++)await arrow('ArrowLeft',37);
+   for(const [count,key,code,effort,index] of [[2,'ArrowRight',39,'high','2'],[2,'ArrowLeft',37,'low','0']]){
+    for(let i=0;i<count;i++)await arrow(key,code);
+    assert.equal(await c.evaluate("document.querySelector('[data-reasoning-slider] [role=slider]').getAttribute('aria-valuenow')"),index);
+    await wait(async()=>{const config=(await r.call('config/read')).config;return config.model===model&&config.model_reasoning_effort===effort;},15000);
+   }
+   await escape();report.checks.nativeEffortSelectionPersists=true;
+  }
  }
  report.checks.nativeModelSelection=true;
  assert.equal(await c.evaluate('performance.timeOrigin'),epoch);report.checks.noAppRestart=true;
@@ -44,7 +57,7 @@ let c;
  await c.call('Emulation.setEmulatedMedia',{features:[]});report.checks.preferenceLayoutsVisible=true;
  report.passed=true;
 })().catch(e=>{report.error=e.stack;process.exitCode=1;}).finally(()=>{
- c?.close();report.completedAt=new Date().toISOString();
+ c?.close();r?.close();report.completedAt=new Date().toISOString();
  fs.writeFileSync(path.join(root,'evidence/unified-providers-ui.json'),JSON.stringify(report,null,2)+'\n');
  console.log(JSON.stringify(report));
 });

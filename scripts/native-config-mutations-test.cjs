@@ -21,6 +21,27 @@ async function check(name,fn){await fn();tests.push(name);}
  await check('failed write does not revoke and a later request can retry',async()=>{const c=fixture();c.failWrite=true;await assert.rejects(c.run.call('config/batchWrite',{}),/write failed/);assert.equal(c.revoked,0);c.failWrite=false;await c.run.call('config/batchWrite',{});assert.equal(c.writes,1);});
  await check('queued writes cannot hide a transient permission change',async()=>{const c=fixture(),original=structuredClone(c.state);let release;c.wait=()=>new Promise(r=>release=r);const a=c.run.call('config/batchWrite',{state:{config:{permissions:{audit:{write:true}}},layers:[]}});while(!release)await new Promise(r=>setImmediate(r));const b=c.run.call('config/batchWrite',{state:original});delete c.wait;release();await Promise.all([a,b]);assert.equal(c.revoked,2);});
  await check('busy state is checked when a queued mutation starts',async()=>{const c=fixture();let release;c.wait=()=>new Promise(r=>release=r);const a=c.run.call('config/batchWrite',{});while(!release)await new Promise(r=>setImmediate(r));const b=c.run.call('config/batchWrite',{});c.busy=true;release();await a;await assert.rejects(b,/請先停止/);assert.equal(c.writes,1);});
+ await check('busy model and effort selection persists without revoking active tools',async()=>{
+  for(const [method,params] of [
+   ['config/value/write',{keyPath:'model',value:'gpt-test',state:{config:{model:'gpt-test'}}}],
+   ['config/value/write',{keyPath:'model_reasoning_effort',value:'high'}],
+   ['config/batchWrite',{edits:[{keyPath:'model',value:'gpt-test'},{keyPath:'model_reasoning_effort',value:null}],state:{config:{model:'gpt-test'}}}],
+   ['config/batchWrite',{edits:[]}]
+  ]){const c=fixture();c.busy=true;assert.deepEqual(await c.run.call(method,params),{ok:true});assert.equal(c.writes,1);assert.equal(c.revoked,0);if(params.state)assert.deepEqual(c.state,params.state);}
+ });
+ await check('mixed, unknown and malformed busy writes remain blocked',async()=>{
+  for(const [method,params] of [
+   ['config/batchWrite',{edits:[{keyPath:'model',value:'gpt-test'},{keyPath:'mcp_servers',value:{}}]}],
+   ['config/value/write',{keyPath:'model.provider.permissions',value:true}],
+   ['config/batchWrite',{edits:[null]}],['config/batchWrite',{}],
+   ['config/batchWrite',{edits:{}}],['plugin/enable',{}]
+  ]){const c=fixture();c.busy=true;await assert.rejects(c.run.call(method,params),/請先停止/);assert.equal(c.writes,0);}
+ });
+ await check('selection write failure is reported and subsequent selection can retry',async()=>{
+  const c=fixture();c.busy=true;c.failWrite=true;const params={keyPath:'model',value:'gpt-test'};
+  await assert.rejects(c.run.call('config/value/write',params),/write failed/);
+  c.failWrite=false;await c.run.call('config/value/write',params);assert.equal(c.writes,1);assert.equal(c.revoked,0);
+ });
  await check('settled waits for writes queued while the previous write completes',async()=>{
   const c=fixture();let first,second,done=false;
   c.wait=()=>new Promise(r=>first=r);const a=c.run.call('config/batchWrite',{});

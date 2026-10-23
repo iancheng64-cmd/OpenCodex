@@ -3,8 +3,8 @@ const fs=require('node:fs'),crypto=require('node:crypto');
 // A remote app-server drains queue/add itself, bypassing the Mac run/tool gate.
 // Keep the native protocol, but dispatch through the same validated turn/start.
 class NativeQueue{
- constructor({file,context,start,emit,onError}){
-  Object.assign(this,{file,context,startTurn:start,emit,onError});this.starting=false;this.timer=null;
+ constructor({file,context,start,emit,onError,selection=()=>({})}){
+  Object.assign(this,{file,context,startTurn:start,emit,onError,selection});this.starting=false;this.timer=null;
   this.data={};if(fs.existsSync(file))this.data=JSON.parse(fs.readFileSync(file,'utf8'));
  }
  key(profile,threadId){return JSON.stringify([profile,threadId]);}
@@ -25,7 +25,7 @@ class NativeQueue{
    if(!p.clientUserMessageId||!Array.isArray(p.input)||!p.input.length)throw Error('排隊訊息內容不完整。');
    const previous=e.items.find(i=>i.clientUserMessageId===p.clientUserMessageId);
    if(previous)return {queuedSubmission:this.clean(previous)};
-   const item={id:crypto.randomUUID(),clientUserMessageId:p.clientUserMessageId,input:p.input};e.items.push(item);this.save();this.changed(e.threadId);this.kick();return {queuedSubmission:this.clean(item)};
+   const item={id:crypto.randomUUID(),clientUserMessageId:p.clientUserMessageId,input:p.input,selection:structuredClone(this.selection(p.threadId))};e.items.push(item);this.save();this.changed(e.threadId);this.kick();return {queuedSubmission:this.clean(item)};
   }
   if(method==='thread/queue/delete'){
    const index=e.items.findIndex(i=>i.id===p.queuedSubmissionId);
@@ -61,7 +61,7 @@ class NativeQueue{
   const item=id?e.items.find(i=>i.id===id):e.items[0];if(!item)throw Error('沒有待執行的排隊訊息。');
   this.starting=true;e.inflight=item.id;e.paused=false;this.save();
   try{
-   const result=await this.startTurn(e.threadId,item.input);
+   const result=await this.startTurn(e.threadId,item.input,item.selection||{});
    e.items=e.items.filter(i=>i.id!==item.id);e.inflight=null;this.save();this.changed(e.threadId);return result;
   }catch(error){
    // A transport failure may follow successful acceptance. Never auto-retry.

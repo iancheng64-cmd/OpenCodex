@@ -153,7 +153,7 @@ function local(){
 }
 let localReady;const localTurns=new Set();
 const nativeShell=new (require('./native-shell.cjs').NativeShell)({file:path.join(root,'native-shell-history.json'),ready:readyLocal,getRpc:()=>localRpc,emit:message=>{for(const ws of clients)send(ws,message);if(message.method==='turn/completed'){if(runtime)void refreshHistory(runtime,message.params.threadId);nativeQueue.completed(runtime?.snapshot?.profileId,message.params.threadId,message.params.turn.status);}},onError:error=>audit('native-shell-error',{message:error.message})});
-const nativeQueue=new (require('./native-queue.cjs').NativeQueue)({file:path.join(root,'native-queue.json'),context:()=>({profile:runtime?.snapshot?.profileId,connected:isRemote()&&!!runtime&&!runtime.closed&&clients.size>0,busy:!!runtime?.run||!!runtime?.openCodexPreparing||!!handoff?.busy||!!nativeShell.active,ready:id=>runtime?.openCodexThreads?.has(id)&&known[id]?.profile===runtime?.snapshot?.profileId}),start:(threadId,input)=>request([...clients][0],'turn/start',{threadId,input},true),emit:message=>{for(const ws of clients)send(ws,message);},onError:error=>{bridgeError='排隊訊息未確認送出：'+error.message;audit('native-queue-error',{message:error.message});publish();}});
+const nativeQueue=new (require('./native-queue.cjs').NativeQueue)({file:path.join(root,'native-queue.json'),context:()=>({profile:runtime?.snapshot?.profileId,connected:isRemote()&&!!runtime&&!runtime.closed&&clients.size>0,busy:!!runtime?.run||!!runtime?.openCodexPreparing||!!handoff?.busy||!!nativeShell.active,ready:id=>runtime?.openCodexThreads?.has(id)&&known[id]?.profile===runtime?.snapshot?.profileId}),selection:threadId=>handoff?.snapshot(threadId)||{},start:(threadId,input,selection)=>request([...clients][0],'turn/start',{threadId,input,...selection},true),emit:message=>{for(const ws of clients)send(ws,message);},onError:error=>{bridgeError='排隊訊息未確認送出：'+error.message;audit('native-queue-error',{message:error.message});publish();}});
 function readyLocal(){if(localRpc?.isClosed)localReady=null;if(!localReady){const rpc=local();localReady=rpc.request('initialize',{clientInfo:{name:'opencodex',title:'OpenCodex',version:openCodexVersion},capabilities:{experimentalApi:true}}).then(r=>{rpc.notify('initialized');if(!isRemote())quotaMonitor.refresh();return r;}).catch(e=>{localReady=null;throw e;});}return localReady;}
 async function connectBridge(input={}){
  if(!isRemote())throw Error('請先切換至 SSH 模式。');
@@ -316,7 +316,11 @@ async function request(ws,method,params,fromQueue=false){
    if(rewritten)({method,params}=rewritten);if(handoff.defaultEngine!==before)setImmediate(publish);
   }
   if(method==='thread/start')startModel=handoff.requested(params);
-  if(method==='turn/interrupt'&&await handoff.interrupt(params?.threadId))return {};
+  if(method==='turn/interrupt'&&params?.threadId){
+   if(known[params.threadId]?.profile!==profileId||known[params.threadId]?.deleted)throw Error('此對話不屬於目前 OpenCodex 主機或已刪除。');
+   nativeQueue.pause(profileId,params.threadId);
+   if(await handoff.interrupt(params.threadId))return {};
+  }
   const chosen=method==='turn/start'?handoff.selection(method,params):null;
   if(handoff.isModel(chosen)){
    if(known[params.threadId]?.profile!==profileId||known[params.threadId]?.deleted)throw Error('此對話不屬於目前 OpenCodex 主機或已刪除。');
@@ -328,9 +332,19 @@ async function request(ws,method,params,fromQueue=false){
    const result=await handoff.start({...params,model:chosen},{cwd:known[params.threadId]?.localCwd||settings.cwd});
    audit('rpc',{method,handoff:handoff.owner(chosen).provider,success:true});
    // What actually runs: model and effort only, never message content.
-   audit('turn-model',{route:handoff.owner(chosen).provider,threadId:params.threadId,model:chosen,effort:handoff.threads?.[params.threadId]?.effort||null});return result;
+   audit('turn-model',{route:handoff.owner(chosen).provider,threadId:params.threadId,model:chosen,effort:handoff.activeChoices.get(params.threadId)?.effort??null});return result;
   }
-  if(method==='turn/steer'&&params?.threadId&&handoff.running(params.threadId)){const result=await handoff.steer(params);audit('rpc',{method,handoff:'claude',success:true});return result;}
+  if(method==='turn/steer'&&params?.threadId){
+   const id=params.threadId,owner=runtime;
+   const check=()=>{if(!owner||owner.closed||runtime!==owner||!clients.has(ws)||known[id]?.profile!==profileId||known[id]?.deleted)throw Error('連線或對話已改變；訊息未送出。');};
+   check();
+   if(handoff.restartForSteer(id)){
+    const active=()=>{const h=handoff.runningProvider(id),r=h?.claude.runtime?.run||(owner.run?.threadId===id?owner.run:null);return r?{turnId:r.turnId||r.turn?.id}:h||owner.openCodexPreparing?.threadId===id?{turnId:null}:null;};
+    const result=await handoff.replaceActiveTurn(params,{active,check,interrupt:()=>request(ws,'turn/interrupt',{threadId:id,turnId:params.expectedTurnId}),start:p=>request(ws,'turn/start',p)});
+    audit('rpc',{method,handoff:'restart-selected-model',success:true});return result;
+   }
+   if(handoff.running(id)){const result=await handoff.steer(params);audit('rpc',{method,handoff:'claude',success:true});return result;}
+  }
   if(params?.threadId&&handoff.selectionOnly(method,params)&&(handoff.running(params.threadId)||runtime?.run?.threadId===params.threadId||runtime?.openCodexPreparing?.threadId===params.threadId)){
    if(known[params.threadId]?.profile!==profileId||known[params.threadId]?.deleted)throw Error('此對話不屬於目前 OpenCodex 主機或已刪除。');
    const result=await request(ws,'thread/read',{threadId:params.threadId,includeTurns:!params.excludeTurns});
@@ -480,7 +494,7 @@ async function request(ws,method,params,fromQueue=false){
   const verifiedPermission=permissionSnapshot(requestOwner,selection,resultCwd,params?.threadId,wireMethod==='thread/read');
   const result=workspace.localResult(nativePolicy.localSnapshot(await nativeShell.commitHistoryMutation(historyPlan,raw,requestOwner.rpc,{knownEmpty}),selection,resultCwd,verifiedPermission),known,selectedCwd);
   if(method==='thread/resume'&&result.thread?.id&&handoff){const selected=handoff.selectedModel(result.thread.id);if(selected){result.model=selected;result.reasoningEffort=handoff.selectedEffort(result.thread.id)||null;}}
-  if(method==='thread/start'&&startModel&&handoff)Object.assign(result,handoff.started(startModel,result));
+  if(method==='thread/start'&&handoff)Object.assign(result,handoff.started(startModel,result));
   if(explicitPermission&&settings.permissionMode!==selection.requested){settings.permissionMode=selection.requested;save();}
   if(explicitReviewer&&settings.approvalsReviewer!==selection.reviewer){settings.approvalsReviewer=selection.reviewer;save();}
   if(result.thread?.id){result.thread=organization.captureThread(profileId,method,params,workspace.localThread(result.thread,known,selectedCwd));if(['thread/read','thread/resume'].includes(method)||(method==='thread/fork'&&!params.excludeTurns))result.thread=nativeShell.merge(result.thread);const {turns,...summary}=result.thread;known[result.thread.id]={...known[result.thread.id],emptyHistory:method==='thread/start'?true:turns?.length?false:known[result.thread.id]?.emptyHistory,profile:requestOwner.snapshot.profileId,localCwd:selectedCwd||known[result.thread.id]?.localCwd,permissionMode:selectedCwd?selection.requested:known[result.thread.id]?.permissionMode,approvalsReviewer:selectedCwd?selection.reviewer:known[result.thread.id]?.approvalsReviewer,permissionSnapshot:verifiedPermission||known[result.thread.id]?.permissionSnapshot,environmentId:requestOwner.executor?.environmentId,summary};remoteThreadCache.set(result.thread.id,result,requestOwner.snapshot.profileId,require('./native-history.cjs').snapshotOptions(method,params));fs.writeFileSync(knownFile,JSON.stringify(known),{mode:0o600});}

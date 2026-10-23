@@ -4,7 +4,7 @@ root=Path(__file__).resolve().parent.parent
 app=root/'build/OpenCodex.app'
 p=app/'Contents/Info.plist'
 d=plistlib.load(p.open('rb'))
-d.update(CFBundleExecutable='OpenCodex',CFBundleName='OpenCodex',CFBundleDisplayName='OpenCodex',CFBundleIdentifier='io.opencodex.desktop',CFBundleShortVersionString='26.1007.71326',CFBundleVersion='20398',OpenCodexVersion='0.4.11',CFBundleAlternateNames=['OpenCodex'],CrProductDirName='io.opencodex.desktop',CFBundleURLTypes=[{'CFBundleURLName':'OpenCodex','CFBundleURLSchemes':['opencodex']}])
+d.update(CFBundleExecutable='OpenCodex',CFBundleName='OpenCodex',CFBundleDisplayName='OpenCodex',CFBundleIdentifier='io.opencodex.desktop',CFBundleShortVersionString='26.1007.71326',CFBundleVersion='20398',OpenCodexVersion='0.4.12',CFBundleAlternateNames=['OpenCodex'],CrProductDirName='io.opencodex.desktop',CFBundleURLTypes=[{'CFBundleURLName':'OpenCodex','CFBundleURLSchemes':['opencodex']}])
 d['ElectronAsarIntegrity']={'Resources/app.asar':{'algorithm':'SHA256','hash':(root/'build/asar-hash.txt').read_text().strip()}}
 for key in list(d):
  if key.startswith('SU') or key in ['CFBundleDocumentTypes','UTExportedTypeDeclarations','UTImportedTypeDeclarations','LSHasLocalizedDisplayName']:

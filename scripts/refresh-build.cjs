@@ -8,7 +8,7 @@ cp.execFileSync('codesign',['--verify','--deep','--strict',app]);
 const running=cp.execFileSync('ps',['-axo','comm='],{encoding:'utf8'}).split('\n');
 if(running.some(s=>s.trim().startsWith(app+'/')))throw Error('Close the development app before refreshing its bundle.');
 const a=archive(file),pkg=JSON.parse(a.read('package.json'));
-if(pkg.name!=='opencodex-desktop'||!['0.4.1','0.4.2','0.4.3','0.4.4','0.4.5','0.4.6','0.4.7','0.4.8','0.4.9','0.4.10','0.4.11'].includes(pkg.openCodexVersion)||pkg.codexBuildNumber!=='20398')throw Error('Unrecognized native baseline');
+if(pkg.name!=='opencodex-desktop'||!['0.4.1','0.4.2','0.4.3','0.4.4','0.4.5','0.4.6','0.4.7','0.4.8','0.4.9','0.4.10','0.4.11','0.4.12'].includes(pkg.openCodexVersion)||pkg.codexBuildNumber!=='20398')throw Error('Unrecognized native baseline');
 const nativePreload=a.read('.vite/build/preload.js').toString();
 const marker=";(()=>{\n const {ipcRenderer,contextBridge}=require('electron');";
 const offset=nativePreload.indexOf(marker);
@@ -16,7 +16,7 @@ if(offset<0||offset!==nativePreload.lastIndexOf(marker))throw Error('OpenCodex p
 let preload=fs.readFileSync(path.join(root,'src/native-preload.cjs'),'utf8');
 preload=preload.replace("/*OPEN_CODEX_STYLES*/''",JSON.stringify(fs.readFileSync(path.join(root,'src/connections.css'),'utf8')));
 preload=preload.replace("/*OPEN_CODEX_PANEL*/''",JSON.stringify(fs.readFileSync(path.join(root,'src/connections.html'),'utf8')));
-pkg.openCodexVersion='0.4.11';
+pkg.openCodexVersion='0.4.12';
 const changes={'package.json':JSON.stringify(pkg),'.vite/build/preload.js':nativePreload.slice(0,offset)+preload};
 for(const name of fs.readdirSync(path.join(root,'src'))){
  if(['bridge-adapter.cjs','native-preload.cjs'].includes(name))continue;
@@ -82,6 +82,6 @@ const header=patchAsar(file,changes);
 fs.writeFileSync(path.join(root,'build/asar-hash.txt'),header);
 for(const [target,code] of runtimeChanges)fs.writeFileSync(target,code);
 for(const name of ['controls.html','controls.js','controls-preload.cjs'])fs.copyFileSync(path.join(root,'src',name),path.join(res,'opencodex-ui',name));
-const report={at:new Date().toISOString(),version:'0.4.11',nativeBuild:pkg.codexBuildNumber,before,after:crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),updated:Object.keys(changes),requiresSigning:true};
+const report={at:new Date().toISOString(),version:'0.4.12',nativeBuild:pkg.codexBuildNumber,before,after:crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'),updated:Object.keys(changes),requiresSigning:true};
 fs.writeFileSync(path.join(root,'evidence/refresh-build.json'),JSON.stringify(report,null,2)+'\n');
 console.log(JSON.stringify(report));

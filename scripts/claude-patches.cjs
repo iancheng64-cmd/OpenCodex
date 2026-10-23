@@ -23,6 +23,26 @@ function patchClaudeRuntime(code){
 }
 
 function patchClaudeAuthProbe(code){
+ code=once(code,`    let stdout = '';
+    try {
+        stdout = cp.execFileSync(executable, [...args, 'auth', 'status', '--json'], { encoding: 'utf8', env, cwd, timeout: 15000, maxBuffer: 65536, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    }
+    catch (e) {
+        stdout = typeof e.stdout === 'string' ? e.stdout : '';
+    }`,`    let stdout = '';
+    const options = { encoding: 'utf8', env, cwd, timeout: 15000, maxBuffer: 65536, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true };
+    try {
+        stdout = cp.execFileSync(executable, [...args, 'auth', 'status', '--json'], options);
+    }
+    catch (e) {
+        stdout = typeof e.stdout === 'string' ? e.stdout : '';
+        const diagnostic = String(e.stderr || '') + stdout;
+        if (/unknown|unrecognized|unexpected|unsupported|not recognized/i.test(diagnostic) && diagnostic.includes('--json')) {
+            try { stdout = cp.execFileSync(executable, [...args, 'auth', 'status'], options); }
+            catch (fallback) { stdout = typeof fallback.stdout === 'string' ? fallback.stdout : ''; }
+        }
+    }`);
+
  code=once(code,'        return { accountKey:',`        // A locked/restricted Keychain is not evidence that the user signed out.
         // Discard secret stdout at the child-process boundary; return metadata only.
         if (!value.loggedIn && process.platform === 'darwin') {

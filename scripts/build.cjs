@@ -10,7 +10,7 @@ require('./bundle-permission-engine.cjs').bundlePermissionEngine(res);
 for(const n of ['controls.html','controls.js','controls-preload.cjs'])fs.copyFileSync(path.join(root,'src',n),path.join(res,'opencodex-ui',n));
 function replace(s,a,b){if(!s.includes(a))throw Error('Patch anchor missing: '+a.slice(0,100));if(s.indexOf(a)!==s.lastIndexOf(a))throw Error('Non-unique patch: '+a.slice(0,60));return s.replace(a,b);}
 const a=archive(original),changes={},pkg=JSON.parse(a.read('package.json'));
-pkg.name='opencodex-desktop';pkg.productName='OpenCodex';pkg.main='opencodex/bootstrap.cjs';pkg.openCodexVersion='0.4.11';
+pkg.name='opencodex-desktop';pkg.productName='OpenCodex';pkg.main='opencodex/bootstrap.cjs';pkg.openCodexVersion='0.4.12';
 changes['package.json']=JSON.stringify(pkg,null,2);
 for(const n of fs.readdirSync(path.join(root,'src')))if(n!=='bridge-adapter.cjs'&&n!=='native-preload.cjs')changes['opencodex/'+n]=fs.readFileSync(path.join(root,'src',n));
 let boot=a.read('.vite/build/bootstrap-DOZRFVdo.js').toString();

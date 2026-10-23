@@ -20,7 +20,7 @@ function grokModels(state){
  return (state?.availableModels||[]).filter(m=>typeof m.modelId==='string').map(m=>({
   id:m.modelId,model:m.modelId,displayName:m.name||m.modelId,description:m.description||'',isDefault:m.modelId===state.currentModelId,
   inputModalities:['text','image'],defaultReasoningEffort:m._meta?.reasoningEffort||null,
-  supportedReasoningEfforts:(m._meta?.reasoningEfforts||[]).map(e=>({reasoningEffort:e.value||e.id,description:e.description||e.label||e.id}))
+  supportedReasoningEfforts:(m._meta?.reasoningEfforts||[]).map(e=>({reasoningEffort:e.value||e.id,description:e.description||e.label||e.id})).sort((a,b)=>['none','minimal','low','medium','high','xhigh','max','ultra'].indexOf(a.reasoningEffort)-['none','minimal','low','medium','high','xhigh','max','ultra'].indexOf(b.reasoningEffort))
  }));
 }
 function agyModels(raw){

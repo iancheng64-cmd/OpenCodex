@@ -216,7 +216,7 @@ const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve
   });
   await test('same-thread Claude handoff lists Claude models, routes Claude turns and never forwards Claude ids to Codex',async()=>{
    const started=[],flushed=[],original=runtime.rpc.request;
-   context.handoff={isModel:model=>String(model||'').startsWith('opencodex-claude:'),owner:()=>({provider:'claude'}),selectionOnly:()=>false,selectedEffort:()=>null,busy:false,connected:true,running:()=>false,interrupt:async()=>false,selectedModel:()=>null,codexTurn:()=>{},configWrite:()=>null,requested:p=>p?.model||null,started:(_m,r)=>r,readConfig:r=>r,
+   context.handoff={activeChoices:new Map(),isModel:model=>String(model||'').startsWith('opencodex-claude:'),owner:()=>({provider:'claude'}),selectionOnly:()=>false,selectedEffort:()=>null,busy:false,connected:true,running:()=>false,interrupt:async()=>false,selectedModel:()=>null,codexTurn:()=>{},configWrite:()=>null,requested:p=>p?.model||null,started:(_m,r)=>r,readConfig:r=>r,
     listModels:r=>({...r,data:[...(r.data||[]),{model:'opencodex-claude:claude-opus-5-5'}]}),
     start:async(p,o)=>{started.push([p,o]);return {turn:{id:'claude-turn'}};},
     selection:(m,p)=>m==='turn/start'?p?.model:null,strip:(_m,p)=>{if(!p)return p;const {model,...rest}=p;return String(model).startsWith('opencodex-claude:')?rest:p;},flush:async id=>{flushed.push(id);}};
