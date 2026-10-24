@@ -23,15 +23,21 @@ try{
   const saved=JSON.stringify(original);
   const claude=engineTransition(original,{engine:'claude'});
   assert.equal(claude.mode,'ssh');assert.equal(claude.sshAgent,'claude');
+  assert.equal(claude.profileId,'codex-host');assert.equal(claude.cwd,'/codex');
   Object.assign(claude,{profileId:'claude-host',profileName:'Claude host',cwd:'/claude'});
   const back=engineTransition(claude,{engine:'codex'});
-  assert.equal(back.mode,mode);assert.equal(back.profileId,'codex-host');assert.equal(back.cwd,'/codex');assert(back.fullAccess);
+  assert.equal(back.mode,mode);assert.equal(back.profileId,'claude-host');assert.equal(back.cwd,'/claude');assert(back.fullAccess);
   const again=engineTransition(back,{engine:'claude'});
   assert.equal(again.profileId,'claude-host');assert.equal(again.cwd,'/claude');assert.equal(again.mode,'ssh');
   assert.equal(JSON.stringify(original),saved);
  }
+ {
+  const stale={mode:'ssh',sshAgent:'codex',engineContexts:{claude:{mode:'ssh',profileId:'old-host',profileName:'Old',cwd:'/old'}}};
+  const claude=engineTransition(stale,{engine:'claude'});
+  assert.equal(claude.profileId,'old-host');assert.equal(claude.cwd,'/old');
+ }
  assert.throws(()=>engineTransition({mode:'official'},{engine:'unknown'}),/Agent/);
- tests.push('engine roundtrip restores official/custom/SSH routing, per-host directories and full access without mutating input');
+ tests.push('engine switches keep the connected host, restore official/custom/SSH routing and full access without mutating input');
  const {discussionDeadline,discussionTransportDeadline}=require('./runtime-patches.cjs');
  const host=fs.readFileSync(path.join(__dirname,'../vendor/agentbridge/dist-main/local-tool-host.js'),'utf8');
  const patched=discussionDeadline(host);assert.equal(discussionDeadline(patched),patched);

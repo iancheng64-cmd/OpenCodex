@@ -39,7 +39,8 @@ function claudeConnection(value={}){
  return configDir?{authMode,configDir}:{authMode};
 }
 // Snapshot only routing preferences; history, model settings and credentials stay
-// in their existing engine-specific stores.
+// in their existing engine-specific stores. The connected host is shared by every
+// engine, so a saved per-engine host only applies when no host is selected yet.
 function engineTransition(settings,input){
  const current=settings.mode==='ssh'&&settings.sshAgent==='claude'?'claude':'codex';
  const contexts={...settings.engineContexts,[current]:{mode:settings.mode,profileId:settings.profileId,profileName:settings.profileName,cwd:settings.cwd}};
@@ -47,7 +48,7 @@ function engineTransition(settings,input){
  if(!['codex','claude'].includes(target))throw Error('無效的 Agent。');
  const saved=contexts[target]||{};
  const next={...settings,engineContexts:contexts};
- if(target!==current)for(const key of ['profileId','profileName','cwd'])if(saved[key]!==undefined)next[key]=saved[key];
+ if(target!==current&&!settings.profileId)for(const key of ['profileId','profileName','cwd'])if(saved[key]!==undefined)next[key]=saved[key];
  next.mode=input.engine?(target==='claude'?'ssh':(['ssh','official','custom'].includes(saved.mode)?saved.mode:'ssh')):input.mode;
  next.sshAgent=target;
  return next;

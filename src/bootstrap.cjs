@@ -195,7 +195,8 @@ async function connectBridge(input={}){
   }
   const next=targetClaude?bridge.claudeBackend.openCodexClaudeRuntimes.get(result.runtimeId):backend.openCodexRuntimes.get(result.runtimeId);
   if(asPeer){const old=peer;peer=next;if(targetClaude){peer.localCwd=peer.cwd;peer.toolHost=peer.host;if(!isClaude()){handoff.detach(old);handoff.attach(next,result);applyPendingDefault();}}else{const codexPeer=peer;peer.rpc.on('closed',()=>{publish();if(peer===codexPeer){audit('ssh-peer-closed',{agent:'codex'});peerReconnect.schedule(codexPeer);}});}settings.peerProfileId=profile.id;}
-  else {await external?.closeAll();await disconnectPeer();if(isClaude())claude.attach(next,result);else attach(next);settings.profileId=profile.id;settings.profileName=profile.name;settings.cwd=localCwd;}
+  // A new main host moves the collaborator too: restorePeer falls back to profileId.
+  else {await external?.closeAll();await disconnectPeer();if(isClaude())claude.attach(next,result);else attach(next);settings.profileId=profile.id;settings.profileName=profile.name;settings.cwd=localCwd;delete settings.peerProfileId;}
   if(targetClaude)settings.claudeConnections={...settings.claudeConnections,[profile.id]:claudeConnection(params)};
   save();
   if(previous&&previous!==next&&!previous.closed)await handlers.get(targetClaude?'claude:disconnect':'runtime:disconnect')({},targetClaude?previous.cli.id:previous.id);
