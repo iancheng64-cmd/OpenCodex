@@ -165,12 +165,13 @@ class App{
   this.turn=turn;
   if(handedOver.length&&!this.options.json)ui.info('交接 '+handedOver.length+' 個其他模型的回合給 '+PROVIDERS[provider].label);
   if(!this.options.json)ui.startStream();
+  this.tui?.setWorking(PROVIDERS[provider].label+' 工作中');
   try{
    await driver.send({requestId:record.id,prompt,model:this.current.model,effort:this.current.effort||undefined,conversationId:this.session.conversations[provider]||undefined});
    this.session.markSynced(provider,handedOver);
-  }catch(e){this.turn=null;this.session.finish(record,{status:'error',error:e.message});ui.endStream();throw e;}
+  }catch(e){this.turn=null;this.tui?.setWorking(null);this.session.finish(record,{status:'error',error:e.message});ui.endStream();throw e;}
   const result=await completion;
-  this.turn=null;
+  this.turn=null;this.tui?.setWorking(null);
   if(!this.options.json)ui.endStream();
   this.session.finish(record,result);
   const secs=((Date.now()-started)/1000).toFixed(1);
@@ -207,17 +208,22 @@ class App{
   }
   if(!this.drivers.size)ui.line('尚未啟動任何供應商。');
  }
- async printModels(all=false){
-  const ids=all?Object.keys(PROVIDERS):[...this.drivers.keys()];
-  const rows=[];let n=0;const index=[];
+ // Collect models from connected providers; with all=true, start the others too (failures are reported, not fatal).
+ async collectModels(all=false){
+  const ids=all?Object.keys(PROVIDERS):[...this.drivers.keys()];const index=[];
   for(const id of ids){
    let d=this.drivers.get(id);
    if(!d&&all){try{d=await this.provider(id,{quiet:true});}catch(e){ui.line(ui.color.dim('  '+PROVIDERS[id].label+'：'+e.message));continue;}}
    if(!d)continue;
-   for(const m of d.models()){n++;index.push({provider:id,model:m.model});const efforts=(m.supportedReasoningEfforts||[]).map(e=>e.reasoningEffort).join('/');rows.push([String(n)+')',id+':'+m.model+(m.isDefault?' *':''),m.displayName!==m.model?m.displayName:'',efforts]);}
+   for(const m of d.models())index.push({provider:id,model:m.model,displayName:m.displayName,isDefault:m.isDefault===true,efforts:(m.supportedReasoningEfforts||[]).map(e=>e.reasoningEffort)});
   }
-  if(!rows.length){ui.line('尚無模型；先用 /model codex 或 /model claude 啟動供應商。');return [];}
-  ui.table(rows);return index;
+  return index;
+ }
+ async printModels(all=false){
+  const index=await this.collectModels(all);
+  if(!index.length){ui.line('尚無模型；先用 /model codex 或 /model claude 啟動供應商。');return [];}
+  ui.table(index.map((m,i)=>[String(i+1)+')',m.provider+':'+m.model+(m.isDefault?' *':''),m.displayName!==m.model?m.displayName:'',m.efforts.join('/')]));
+  return index;
  }
  // ---------- slash commands ----------
  async command(line){
@@ -227,14 +233,25 @@ class App{
    case 'exit':case 'quit':case 'q':return 'exit';
    case 'model':{
     if(arg){const r=await this.setModel(arg);ui.ok('模型 → '+this.label()+(r.info.displayName&&r.info.displayName!==r.model?'（'+r.info.displayName+'）':''));return;}
-    const index=await this.printModels(true);if(!index.length)return;
-    const a=(await ui.question(ui.color.cyan('選擇模型編號（Enter 取消）› '))).trim();const n=Number(a);
-    if(Number.isInteger(n)&&n>=1&&n<=index.length){await this.setModel(index[n-1].provider+':'+index[n-1].model);ui.ok('模型 → '+this.label());}
-    return;
+    const index=await this.collectModels(true);if(!index.length){ui.warn('尚未取得任何模型；請先確認 SSH 主機與登入狀態。');return;}
+    const chosen=await ui.select({title:'選擇模型（切換供應商會把目前對話交接給新模型）',items:index.map(m=>({label:m.provider+':'+m.model,description:(m.displayName!==m.model?m.displayName:'')+(m.efforts.length?'  強度 '+m.efforts.join('/'):''),value:m.provider+':'+m.model,selected:m.provider===this.current.provider&&m.model===this.current.model}))});
+    if(!chosen)return;
+    const r=await this.setModel(chosen);
+    if(r.info.supportedReasoningEfforts?.length){
+     const efforts=r.info.supportedReasoningEfforts.map(e=>e.reasoningEffort);
+     const effort=await ui.select({title:'思考強度 · '+this.current.provider+':'+this.current.model,items:[{label:'模型預設',description:r.info.defaultReasoningEffort||'',value:''},...efforts.map(e=>({label:e,value:e,selected:e===this.current.effort}))]});
+     if(effort!==null)this.current.effort=effort||null;
+    }
+    ui.ok('模型 → '+this.label());return;
    }
    case 'models':await this.printModels(!!arg&&arg==='all');return;
    case 'effort':{
-    if(!arg){ui.line('目前思考強度：'+(this.current.effort||'（模型預設）')+'　可用值：'+EFFORTS.join('/'));return;}
+    if(!arg){
+     const d=this.drivers.get(this.current.provider);const m=d?.models().find(m=>m.model===this.current.model);const supported=(m?.supportedReasoningEfforts||[]).map(e=>e.reasoningEffort);
+     if(!supported.length){ui.line('模型 '+this.label()+' 沒有可調整的思考強度。');return;}
+     const chosen=await ui.select({title:'思考強度 · '+this.current.provider+':'+this.current.model,items:[{label:'模型預設',description:m.defaultReasoningEffort||'',value:''},...supported.map(e=>({label:e,value:e,selected:e===this.current.effort}))]});
+     if(chosen===null)return;this.current.effort=chosen||null;ui.ok('思考強度 → '+(this.current.effort||'模型預設'));return;
+    }
     if(arg==='default'||arg==='none'){this.current.effort=null;ui.ok('思考強度 → 模型預設');return;}
     if(!EFFORTS.includes(arg))throw Error('無效的思考強度：'+arg);
     const d=this.drivers.get(this.current.provider);const m=d?.models().find(m=>m.model===this.current.model);const supported=(m?.supportedReasoningEfforts||[]).map(e=>e.reasoningEffort);
@@ -242,7 +259,8 @@ class App{
     this.current.effort=arg;ui.ok('思考強度 → '+arg);return;
    }
    case 'permission':case 'perm':{
-    if(!arg){ui.line('目前 Mac 工具權限：'+this.permissionMode+'（ask / project / full）');return;}
+    let mode=arg;
+    if(!mode){mode=await ui.select({title:'Mac 工具權限（目前：'+this.permissionMode+'）',items:[{label:'ask',description:'每項命令、檔案變更與工具都先確認',value:'ask',selected:this.permissionMode==='ask'},{label:'project',description:'讀取不用確認；寫入與命令仍確認',value:'project',selected:this.permissionMode==='project'},{label:'full',description:'全部允許（危險）',value:'full',selected:this.permissionMode==='full'}]});if(!mode||mode===this.permissionMode)return;arg=mode;}
     if(!['ask','project','full'].includes(arg))throw Error('權限模式須為 ask、project 或 full。');
     if(this.turn)throw Error('請先等目前回合結束。');
     this.permissionMode=arg;const s=cfg.cliSettings();s.permissionMode=arg;cfg.saveCliSettings(s);
@@ -263,10 +281,18 @@ class App{
  async sshCommand(args){
   const [sub,...rest]=args;const name=rest.join(' ').trim();
   const items=cfg.profiles();
-  if(!sub||sub==='list'){
+  if(sub==='list'){
    if(!items.length){ui.line('尚無 SSH 主機。用 /ssh add 新增。');return;}
    ui.table(items.map(p=>[(this.sshState?.profile.id===p.id?'● ':'  ')+p.name,p.username+'@'+p.host+':'+(p.port||22),p.authType,p.runtimePlatform||'auto']));
    return;
+  }
+  if(!sub){
+   const chosen=await ui.select({title:'SSH 主機（目前：'+(this.sshState?.profile.name||'未連線')+'）',items:[...items.map(p=>({label:p.name,description:p.username+'@'+p.host+':'+(p.port||22)+' · '+p.authType+' · '+(p.runtimePlatform||'auto'),value:'use:'+p.id,selected:this.sshState?.profile.id===p.id})),{label:'新增主機…',value:'add'},{label:'編輯主機…',value:'edit'},{label:'移除主機…',value:'remove'}]});
+   if(!chosen)return;
+   if(chosen.startsWith('use:')){const p=items.find(p=>p.id===chosen.slice(4));if(this.sshState?.profile.id===p.id){ui.line('已經連線到 '+p.name);return;}await this.connectSsh(p.id);this.current.model=null;await this.setModel(null).catch(e=>ui.warn(e.message));ui.ok('模型 '+this.label());return;}
+   if(chosen==='add')return this.sshCommand(['add']);
+   const target=await ui.select({title:chosen==='edit'?'編輯哪個主機？':'移除哪個主機？',items:items.map(p=>({label:p.name,description:p.username+'@'+p.host,value:p.name}))});
+   if(!target)return;return this.sshCommand([chosen,target]);
   }
   if(sub==='status'){await this.printStatus();return;}
   if(sub==='use'||sub==='connect'){if(!name)throw Error('請提供主機名稱。');await this.connectSsh(name);this.current.model=null;return;}
@@ -296,7 +322,35 @@ class App{
   throw Error('用法：/ssh [list|use <名稱>|add|edit <名稱>|remove <名稱>|status]');
  }
  // ---------- main loops ----------
+ banner(){
+  const c=ui.color;const inner=Math.min((process.stdout.columns||80)-2,72);
+  const home=os.homedir();const dir=this.cwd.startsWith(home)?'~'+this.cwd.slice(home.length):this.cwd;
+  const host=this.sshState?this.sshState.profile.name+' ('+this.sshState.platform+')':'未連線';
+  const row=s=>c.dim('│ ')+require('./lib/tui.cjs').pad(s,inner-4)+c.dim(' │');
+  const lines=[c.dim('╭'+'─'.repeat(inner-2)+'╮'),row(c.bold('>_ OpenCodex CLI')+c.dim(' (v'+CLI_VERSION+')')),row(''),row(c.dim('model:     ')+this.label()+c.dim('   /model 切換')),row(c.dim('host:      ')+host+c.dim('   /ssh 切換')),row(c.dim('directory: ')+dir+c.dim('   權限 '+this.permissionMode)),c.dim('╰'+'─'.repeat(inner-2)+'╯')];
+  for(const l of lines)ui.line(l);
+  ui.line('');ui.line(c.dim('  描述一項任務就開始，或試試這些指令：'));ui.line('');
+  for(const [n,d] of [['model','選擇模型與思考強度（可跨供應商接續同一對話）'],['ssh','管理或切換 SSH 主機'],['permission','設定在 Mac 上不需確認的操作'],['status','顯示目前工作階段設定'],['quota','查看各供應商剩餘額度']])ui.line('  '+c.bold('/'+n)+c.dim(' - '+d));
+  ui.line('');
+ }
+ async tuiLoop(){
+  const {Tui}=require('./lib/tui.cjs');
+  const tui=new Tui({color:ui.color,title:'OpenCodex',hint:()=>this.label()+(this.sshState?' · '+this.sshState.profile.name:''),
+   onSubmit:async text=>{
+    if(text.startsWith('/')){try{if((await this.command(text))==='exit')await this.shutdown(0);}catch(e){ui.error(e.message);}return;}
+    if(this.turn){tui.queue.push(text);ui.line(ui.color.dim('› 已排隊：'+text));tui.render();return;}
+    await this.runTurn(text);
+    while(tui.queue.length&&!this.shuttingDown)await this.runTurn(tui.queue.shift());
+   },
+   onInterrupt:()=>this.stop(),onExit:()=>this.shutdown(0)});
+  this.tui=tui;ui.setSink(tui);tui.start();
+  try{await this.connectSsh();await this.setModel(this.options.model||null);}catch(e){ui.error(e.message);ui.info('可用 /ssh 管理主機、/model 選擇模型後再開始。');}
+  this.banner();
+  await new Promise(()=>{});
+ }
+ async runTurn(text){this.tui?.user(text);try{await this.send(text);}catch(e){ui.error(e.message);}}
  async repl(){
+  if(process.stdin.isTTY&&process.stdout.isTTY&&!process.env.OPENCODEX_PLAIN)return this.tuiLoop();
   ui.line(ui.color.bold('OpenCodex CLI '+CLI_VERSION)+ui.color.dim('  · /help 查看指令，/model 切換模型（可跨供應商接續同一對話），/ssh 管理主機'));
   ui.line(ui.color.dim('Mac 工作目錄：'+this.cwd+'　權限：'+this.permissionMode));
   try{await this.connectSsh();await this.setModel(this.options.model||null);ui.ok('模型 '+this.label());}
@@ -323,7 +377,7 @@ class App{
   await this.shutdown(result.status==='completed'?0:1);
  }
  turnText(){const t=this.session.turns.at(-1);return t?.assistant||'';}
- async shutdown(code){if(this.shuttingDown)return;this.shuttingDown=true;ui.endStream();this.session?.save();await this.closeProviders();try{this.sshState?.conn.end();}catch{}ui.closeInterface();setTimeout(()=>process.exit(code),200).unref();}
+ async shutdown(code){if(this.shuttingDown)return;this.shuttingDown=true;ui.endStream();if(this.tui){this.tui.setWorking(null);this.tui.stop();ui.setSink(null);}this.session?.save();await this.closeProviders();try{this.sshState?.conn.end();}catch{}ui.closeInterface();setTimeout(()=>process.exit(code),200).unref();}
 }
 async function main(){
  const o=parseArgs(process.argv.slice(2));

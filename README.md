@@ -116,7 +116,9 @@ OpenCodex -p "..." -r <工作階段id> -m codex:gpt-6.1-sol  # 接續先前對�
 OpenCodex ssh list | OpenCodex models | OpenCodex status | OpenCodex sessions
 ```
 
-互動指令：`/model [供應商:模型]`（無參數顯示所有已連線供應商的模型選單）、`/ssh [list|use|add|edit|remove|status]`、`/effort`、`/permission ask|project|full`、`/status`、`/quota`、`/new`、`/sessions`、`/resume <id>`、`/stop`（或 Ctrl+C）、`/exit`。
+互動模式是 Codex CLI 風格的終端介面：歡迎框顯示模型、主機與目錄；底部輸入列輸入 `/` 會彈出指令選單（↑↓ 選擇、Tab 補完、Enter 執行）；回覆即時串流在對話紀錄中，工具呼叫以卡片顯示；需要確認的命令、檔案變更或 Mac 工具會以對話框詢問（`y` 允許、`a` 本工作階段都允許、`n` 拒絕）；Esc 或 Ctrl+C 中止進行中的回合，回合進行時輸入的訊息會排隊。非 TTY（管線）環境自動改用純文字模式。
+
+互動指令：`/model [供應商:模型]`（無參數開啟所有供應商的模型與思考強度選單）、`/ssh [list|use|add|edit|remove|status]`（無參數開啟主機選單）、`/effort`、`/permission ask|project|full`、`/status`、`/quota`、`/new`、`/sessions`、`/resume <id>`、`/stop`、`/exit`。
 
 跨供應商交接與 App 相同：切換模型後，新供應商會收到它尚未看過的回合紀錄作為背景，紀錄中的工具輸出標示為不受信任資料。各供應商仍維持自己的原生工作階段，所以同一供應商連續對話不重送前文。Antigravity 與 Grok 需要 macOS／Linux 主機；Windows 主機可用 Codex 與 Claude Code。工作階段儲存在 `~/Library/Application Support/OpenCodex/cli/sessions/`。
 
