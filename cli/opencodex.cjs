@@ -227,7 +227,7 @@ class App{
  }
  // ---------- slash commands ----------
  async command(line){
-  const [cmd,...rest]=line.slice(1).trim().split(/\s+/);const arg=rest.join(' ').trim();
+  const [cmd,...rest]=line.slice(1).trim().split(/\s+/);let arg=rest.join(' ').trim();
   switch(cmd){
    case 'help':case '?':ui.line(HELP);return;
    case 'exit':case 'quit':case 'q':return 'exit';
@@ -273,7 +273,15 @@ class App{
    case 'cwd':ui.line(this.cwd+'　（變更工作目錄請以 OpenCodex -C <路徑> 重新啟動）');return;
    case 'new':{if(this.turn)throw Error('請先等目前回合結束。');this.session=new Session({cwd:this.cwd,profileId:this.sshState?.profile.id});ui.ok('已開始新工作階段 '+this.session.id.slice(0,8));return;}
    case 'sessions':{const items=Session.list();if(!items.length){ui.line('沒有已儲存的工作階段。');return;}ui.table(items.slice(0,20).map(s=>[s.id.slice(0,8),new Date(s.updatedAt).toLocaleString(),s.turns+' 回合',s.title||'']));return;}
-   case 'resume':{if(!arg)throw Error('請提供工作階段 id。');if(this.turn)throw Error('請先等目前回合結束。');this.session=Session.load(arg);ui.ok('已接續 '+this.session.id.slice(0,8)+'：'+this.session.title);const last=[...this.session.turns].reverse().find(t=>t.model);if(last){try{await this.setModel(last.provider+':'+last.model);}catch{}}return;}
+   case 'resume':{
+    if(this.turn)throw Error('請先等目前回合結束。');
+    if(!arg){
+     const items=Session.list().filter(s=>s.id!==this.session.id);
+     if(!items.length){ui.line('沒有其他可接續的工作階段。');return;}
+     arg=await ui.select({title:'接續哪個工作階段？',items:items.slice(0,30).map(s=>({label:(s.title||'（無標題）').slice(0,50),description:new Date(s.updatedAt).toLocaleString()+' · '+s.turns+' 回合 · '+s.id.slice(0,8),value:s.id}))});
+     if(!arg)return;
+    }
+    this.session=Session.load(arg);ui.ok('已接續 '+this.session.id.slice(0,8)+'：'+this.session.title);const last=[...this.session.turns].reverse().find(t=>t.model);if(last){try{await this.setModel(last.provider+':'+last.model);}catch{}}return;}
    case 'stop':if(!(await this.stop()))ui.line('目前沒有進行中的回合。');return;
    default:throw Error('未知指令 /'+cmd+'，輸入 /help 查看。');
   }

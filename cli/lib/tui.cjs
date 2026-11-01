@@ -13,7 +13,7 @@ function wrapPlain(text,max){const rows=[];for(const para of String(text).split(
 const SPIN=['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
 const COMMANDS=[
  ['model','選擇模型與思考強度（可跨供應商接續同一對話）'],['ssh','管理或切換 SSH 主機'],['effort','設定思考強度'],['permission','設定在 Mac 上不需確認的操作'],
- ['status','顯示目前工作階段設定'],['quota','查看各供應商剩餘額度'],['models','列出已連線供應商的模型'],['new','開始新的工作階段'],['sessions','列出可接續的工作階段'],['resume','接續工作階段'],
+ ['status','顯示目前工作階段設定'],['quota','查看各供應商剩餘額度'],['models','列出已連線供應商的模型'],['new','開始新的工作階段'],['resume','接續先前的工作階段（開啟選單）'],['sessions','列出可接續的工作階段'],
  ['cwd','顯示 Mac 工作目錄'],['stop','中止目前回合'],['help','顯示說明'],['exit','離開 OpenCodex'],
 ];
 class Tui{
@@ -94,7 +94,7 @@ class Tui{
   const c=this.composer;const popup=this.popup();
   switch(k){
    case '\r':case '\n':{
-    if(popup.length&&!/\s/.test(c.text)){const cmd=popup[this.popupIndex];c.text='/'+cmd[0]+' ';c.cursor=c.text.length;if(cmd[0]==='resume'){this.render();return;}}
+    if(popup.length&&!/\s/.test(c.text)){const cmd=popup[this.popupIndex];c.text='/'+cmd[0]+' ';c.cursor=c.text.length;}
     const text=c.text.trim();if(!text)return;
     c.history.push(c.text);c.index=-1;c.draft='';c.text='';c.cursor=0;this.popupIndex=0;this.render();
     void this.onSubmit(text);return;
