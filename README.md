@@ -96,6 +96,32 @@ Grok Bot 官方說明中，Auto 可能使用包括 Opus 5.5 在內的後端模�
 
 Hooks、Guardian 自動審批及自訂權限需要對應修改版引擎能力標記。未回報能力的引擎不會被當成支援。完整 ChatGPT 功能、所有雲端服務、所有第三方插件、自訂權限完整 GUI 授權流程，以及跨版本 TCC 授權保留，均未完成完整驗收。
 
+## 終端機版：OpenCodex CLI
+
+`cli/` 是同一套引擎的終端機介面，操作方式對齊 Codex CLI，並保留 App 的核心能力：同一個對話可切換 Codex、Claude Code、Antigravity 與 Grok，模型在 SSH 主機執行，檔案、Shell、瀏覽器與電腦工具都在這台 Mac 執行。CLI 直接讀取 App 的 SSH 主機設定、主機金鑰信任與已儲存的憑證，不需要重新登入；Mac 執行器使用 `/Applications/OpenCodex.app` 內附的 Codex 二進位，因此需先安裝 App。
+
+安裝（建立 `~/.local/bin/OpenCodex` 連結，需 Node.js 22）：
+
+```sh
+ln -sfn "$PWD/cli/bin/opencodex" ~/.local/bin/opencodex
+OpenCodex --help
+```
+
+常用方式：
+
+```sh
+OpenCodex                                   # 互動模式，預設主機與 Codex 預設模型
+OpenCodex -p "整理 src 目錄的結構" -m claude:default   # 單輪模式
+OpenCodex -p "..." -r <工作階段id> -m codex:gpt-6.1-sol  # 接續先前對話並換模型
+OpenCodex ssh list | OpenCodex models | OpenCodex status | OpenCodex sessions
+```
+
+互動指令：`/model [供應商:模型]`（無參數顯示所有已連線供應商的模型選單）、`/ssh [list|use|add|edit|remove|status]`、`/effort`、`/permission ask|project|full`、`/status`、`/quota`、`/new`、`/sessions`、`/resume <id>`、`/stop`（或 Ctrl+C）、`/exit`。
+
+跨供應商交接與 App 相同：切換模型後，新供應商會收到它尚未看過的回合紀錄作為背景，紀錄中的工具輸出標示為不受信任資料。各供應商仍維持自己的原生工作階段，所以同一供應商連續對話不重送前文。Antigravity 與 Grok 需要 macOS／Linux 主機；Windows 主機可用 Codex 與 Claude Code。工作階段儲存在 `~/Library/Application Support/OpenCodex/cli/sessions/`。
+
+`--permission ask` 為預設：Mac 工具與 Codex 的命令／檔案變更逐項在終端機確認（`y` 允許、`a` 本次工作階段都允許、`n` 拒絕）；非互動的 `-p` 模式無法確認時一律拒絕，需要工具請改用 `--permission project` 或 `--permission full`。
+
 ## 開發與建置
 
 **全新 clone 不能直接建出完整 App。** 專案是固定原生基底上的修改工具，使用 ChatGPT `26.1007.71326` build `20398` 與 AgentBridge 執行端。新版官方 App 不能直接混用；版本或 patch 定位不符會中止。

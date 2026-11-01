@@ -1,0 +1,17 @@
+#!/bin/sh
+# OpenCodex CLI launcher. Prefers the user's Node 22, then the Node bundled with OpenCodex.app.
+here="$(cd "$(dirname "$(readlink "$0" || echo "$0")")" 2>/dev/null && pwd)"
+if [ -z "$here" ] || [ ! -f "$here/../opencodex.cjs" ]; then
+  here="$(cd "$(dirname "$0")" && pwd)"
+  target="$0"
+  while [ -L "$target" ]; do target="$(readlink "$target")"; case "$target" in /*) ;; *) target="$here/$target";; esac; here="$(cd "$(dirname "$target")" && pwd)"; done
+fi
+script="$here/../opencodex.cjs"
+for candidate in "$HOME/.local/bin/node" "/opt/homebrew/bin/node" "/usr/local/bin/node" "$(command -v node 2>/dev/null)" "/Applications/OpenCodex.app/Contents/Resources/cua_node/bin/node"; do
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    major="$("$candidate" -p 'process.versions.node.split(".")[0]' 2>/dev/null)"
+    if [ "${major:-0}" -ge 22 ]; then exec "$candidate" "$script" "$@"; fi
+  fi
+done
+echo "OpenCodex CLI 需要 Node.js 22 或更新版本。" >&2
+exit 1

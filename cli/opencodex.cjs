@@ -1,0 +1,348 @@
+#!/usr/bin/env node
+'use strict';
+// OpenCodex CLI: one terminal conversation that can continue with Codex, Claude Code,
+// Antigravity or Grok running on an SSH host, while every tool executes on this Mac.
+const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),crypto=require('node:crypto');
+const cfg=require('./lib/config.cjs'),ui=require('./lib/ui.cjs'),ssh=require('./lib/ssh.cjs');
+const {Session}=require('./lib/session.cjs');
+const CLI_VERSION='0.1.0';
+const PROVIDERS={codex:{label:'Codex',aliases:['gpt','openai']},claude:{label:'Claude Code',aliases:['anthropic']},antigravity:{label:'Antigravity',aliases:['agy','gemini','google']},grok:{label:'Grok',aliases:['xai']}};
+const EFFORTS=['none','minimal','low','medium','high','xhigh','max','ultra'];
+function providerId(name){if(!name)return null;const n=String(name).toLowerCase();for(const [id,p] of Object.entries(PROVIDERS))if(id===n||p.aliases.includes(n))return id;return null;}
+function parseModel(value){
+ if(!value)return null;const at=value.indexOf(':');
+ if(at<0){const p=providerId(value);return p?{provider:p,model:null}:{provider:null,model:value};}
+ const p=providerId(value.slice(0,at));if(!p)throw Error('未知的模型供應商：'+value.slice(0,at)+'（可用：codex、claude、antigravity、grok）');
+ return {provider:p,model:value.slice(at+1)||null};
+}
+function parseArgs(argv){
+ const o={_:[],toolOptions:{}};
+ for(let i=0;i<argv.length;i++){
+  const a=argv[i],next=()=>{if(i+1>=argv.length)throw Error('選項 '+a+' 需要參數。');return argv[++i];};
+  if(a==='-p'||a==='--prompt')o.prompt=next();
+  else if(a==='-m'||a==='--model')o.model=next();
+  else if(a==='--effort')o.effort=next();
+  else if(a==='--profile'||a==='--ssh')o.profile=next();
+  else if(a==='-C'||a==='--cwd')o.cwd=next();
+  else if(a==='--permission')o.permission=next();
+  else if(a==='--full-access')o.permission='full';
+  else if(a==='--resume'||a==='-r')o.resume=next();
+  else if(a==='--trust-host')o.trustHost=next();
+  else if(a==='--no-browser')o.toolOptions.browser=false;
+  else if(a==='--no-computer')o.toolOptions.computer=false;
+  else if(a==='--json')o.json=true;
+  else if(a==='-v'||a==='--version')o.version=true;
+  else if(a==='-h'||a==='--help')o.help=true;
+  else if(a.startsWith('-'))throw Error('未知選項：'+a);
+  else o._.push(a);
+ }
+ return o;
+}
+const HELP=`OpenCodex CLI ${CLI_VERSION} — 在終端機接續使用 Codex / Claude Code / Antigravity / Grok，工具都在這台 Mac 執行。
+
+用法：
+  OpenCodex                         互動模式（預設 SSH 主機與 Codex 預設模型）
+  OpenCodex -p "訊息" [-m 供應商:模型]   單輪模式，輸出最終回覆後結束
+  OpenCodex ssh [list|add|remove <名稱>|use <名稱>]   管理 SSH 主機
+  OpenCodex models                  列出已連線供應商的模型
+  OpenCodex status                  顯示連線、登入與額度
+  OpenCodex sessions                列出可接續的工作階段
+
+選項：
+  -m, --model 供應商:模型   例：codex:gpt-6.1-sol、claude:default、antigravity:gemini-3.8-flash、grok:grok-4.7-build-fast
+      --effort 強度         none/minimal/low/medium/high/xhigh/max（依模型支援）
+      --profile 名稱        SSH 主機（名稱、id 或 user@host）
+  -C, --cwd 路徑            Mac 工作目錄（預設目前目錄）
+      --permission 模式     ask（預設，逐項確認）/ project（可讀，寫入需確認）/ full（全部允許）
+  -r, --resume id          接續先前的工作階段
+      --trust-host 指紋     非互動模式信任新的主機金鑰
+      --no-browser / --no-computer   不啟用瀏覽器／電腦工具
+      --json               單輪模式以 JSON Lines 輸出事件
+
+互動指令：
+  /model [供應商:模型]   切換模型（無參數顯示選單；可在同一對話換另一家 AI）
+  /ssh [list|use|add|remove|status]   管理與切換 SSH 主機
+  /effort 強度           設定思考強度        /permission 模式   設定 Mac 工具權限
+  /status  /quota        連線與額度          /models            模型清單
+  /new  /sessions  /resume id   工作階段      /cwd               顯示工作目錄
+  /stop  或 Ctrl+C       中止目前回合        /exit              離開`;
+class App{
+ constructor(options){
+  this.options=options;this.drivers=new Map();this.sessionGrants=new Set();this.permissionMode=['ask','project','full'].includes(options.permission)?options.permission:(cfg.cliSettings().permissionMode||'ask');
+  this.cwd=fs.realpathSync(options.cwd||process.cwd());if(!fs.statSync(this.cwd).isDirectory())throw Error('工作目錄必須是資料夾。');
+  this.resources=cfg.resourcesPath();this.interactive=!options.prompt&&process.stdin.isTTY;this.current={provider:'codex',model:null,effort:options.effort||null};
+  this.turn=null;this.sshState=null;
+ }
+ // ---------- SSH ----------
+ async connectSsh(selector){
+  const profile=ssh.pickProfile(selector||this.options.profile);
+  if(this.sshState?.profile.id===profile.id&&!this.sshState.conn.destroyed)return this.sshState;
+  if(this.turn)throw Error('請先等目前回合結束，再切換主機。');
+  await this.closeProviders();
+  if(this.sshState){const old=this.sshState;this.sshState=null;try{old.conn.end();}catch{}}
+  ui.info('連線 SSH '+profile.username+'@'+profile.host+' …');
+  this.sshState=await ssh.connect(profile,{interactive:process.stdin.isTTY,trustedFingerprint:this.options.trustHost});
+  const state=this.sshState;
+  state.conn.on('close',()=>{if(this.shuttingDown||this.sshState!==state)return;ui.warn('SSH 連線已中斷；指令不會自動重送。');for(const d of this.drivers.values())void d.stop().catch(()=>{});this.drivers.clear();this.sshState=null;if(this.turn)this.turn.resolve({status:'error',error:'SSH 連線已中斷'});});
+  ui.ok('已連線 '+profile.name+'（'+this.sshState.platform+'）');
+  const s=cfg.cliSettings();s.profileId=profile.id;cfg.saveCliSettings(s);
+  if(this.session)this.session.profileId=profile.id;
+  return this.sshState;
+ }
+ // ---------- providers ----------
+ async provider(id,{quiet=false}={}){
+  const existing=this.drivers.get(id);if(existing&&!existing.closed)return existing;
+  if(!this.sshState)await this.connectSsh();
+  const settings=cfg.settings(),profile=this.sshState.profile;
+  const common={ssh:this.sshState,cwd:this.cwd,permissionMode:this.permissionMode,resources:this.resources,toolOptions:this.options.toolOptions,onEvent:e=>this.event(e),authorizeTool:call=>this.authorizeTool(call)};
+  let driver;
+  if(id==='codex'){const {CodexDriver}=require('./lib/providers/codex.cjs');driver=new CodexDriver({...common,executable:settings.codexConnections?.[profile.id]?.executable,approve:r=>this.approve(r),askUser:q=>ui.ask(q),version:CLI_VERSION});}
+  else if(id==='claude'){const {ClaudeDriver}=require('./lib/providers/claude.cjs');driver=new ClaudeDriver({...common,connection:settings.claudeConnections?.[profile.id]||{authMode:'official'}});}
+  else{const {ExternalDriver}=require('./lib/providers/external.cjs');driver=new ExternalDriver({...common,id});}
+  if(!quiet)ui.info('啟動 '+PROVIDERS[id].label+' …');
+  await driver.start();
+  this.drivers.set(id,driver);
+  const st=driver.status();
+  if(!quiet)ui.ok(PROVIDERS[id].label+' 已連線'+(st.runtimeVersion?'（'+st.runtimeVersion+'）':'')+(st.account?.authenticated?'，已登入 '+(st.account.authMethod||''):'，'+ui.color.yellow('尚未登入')+(st.error?'：'+st.error:'')));
+  return driver;
+ }
+ async closeProviders(){for(const d of this.drivers.values())await d.stop().catch(()=>{});this.drivers.clear();}
+ async resolveModel(spec){
+  const parsed=parseModel(spec)||{provider:this.current.provider,model:null};
+  let provider=parsed.provider;
+  if(!provider){for(const d of this.drivers.values())if(d.models().some(m=>m.model===parsed.model||m.id===parsed.model)){provider=d.id;break;}if(!provider)provider=this.current.provider;}
+  const d=await this.provider(provider);
+  const models=d.models();
+  if(!models.length)throw Error(PROVIDERS[provider].label+' 尚未取得模型清單'+(d.status().error?'：'+d.status().error:'。'));
+  const m=parsed.model?models.find(m=>m.model===parsed.model||m.id===parsed.model||m.displayName===parsed.model):models.find(m=>m.isDefault)||models[0];
+  if(!m)throw Error('模型 '+parsed.model+' 不在 '+PROVIDERS[provider].label+' 提供的清單；輸入 /models 查看。');
+  return {provider,model:m.model,info:m};
+ }
+ async setModel(spec){
+  const r=await this.resolveModel(spec);
+  if(this.current.provider!==r.provider&&this.turn)throw Error('目前回合仍在進行；請先 /stop。');
+  this.current.provider=r.provider;this.current.model=r.model;
+  const supported=(r.info.supportedReasoningEfforts||[]).map(e=>e.reasoningEffort);
+  if(this.current.effort&&!supported.includes(this.current.effort))this.current.effort=null;
+  return r;
+ }
+ label(){return this.current.provider+':'+(this.current.model||'…')+(this.current.effort?' ['+this.current.effort+']':'');}
+ // ---------- approvals ----------
+ async authorizeTool(call){
+  const key=call.provider+'|'+call.name;if(this.sessionGrants.has(key))return true;
+  if(!process.stdin.isTTY)return false;
+  const decision=await this.approve({provider:call.provider,title:'允許 '+PROVIDERS[call.provider].label+' 在這台 Mac 使用 '+call.name+'？',detail:JSON.stringify(call.arguments,null,2).slice(0,4000)});
+  if(decision==='acceptForSession')this.sessionGrants.add(key);
+  return decision!=='decline';
+ }
+ async approve(r){if(!process.stdin.isTTY){ui.warn('非互動模式無法確認：'+r.title+'（已拒絕；可用 --permission full）');return 'decline';}return ui.approve(r);}
+ // ---------- events ----------
+ event(e){
+  const t=this.turn;
+  if(this.options.json&&this.options.prompt&&!['message'].includes(e.type))process.stdout.write(JSON.stringify({at:Date.now(),...e,text:typeof e.text==='string'?e.text.slice(0,4000):e.text})+'\n');
+  if(e.type==='closed'){ui.warn(PROVIDERS[e.provider]?.label+' 連線已關閉：'+(e.text||''));this.drivers.delete(e.provider);}
+  if(!t||e.provider!==t.provider)return;
+  if(e.type==='message'&&typeof e.text==='string'){t.record.assistant=e.text;if(!this.options.json)ui.stream(e.text);}
+  else if(e.type==='tool'){
+   if(e.status==='running'){if(!t.tools.has(e.itemId)){t.tools.set(e.itemId,{title:e.title||e.tool,status:'running'});if(!this.options.json)ui.tool({...e,title:e.title||e.tool});}}
+   else{const rec=t.tools.get(e.itemId)||{title:e.title||e.tool};rec.status=e.status==='completed'?'completed':'failed';rec.output=String(e.text||'').slice(-4000);t.tools.set(e.itemId,rec);t.record.tools.push(rec);if(!this.options.json)ui.tool({...e,title:rec.title});}
+  }
+  else if(e.type==='session'&&e.conversationId)this.session.conversations[t.provider]=e.conversationId;
+  else if(e.type==='error'&&e.text)t.error=e.text;
+  else if(e.type==='activity'&&this.options.verbose)ui.info(e.text);
+  else if(e.type==='done'){if(e.conversationId)this.session.conversations[t.provider]=e.conversationId;t.resolve({status:e.status,error:e.error||e.text||t.error});}
+ }
+ // ---------- turns ----------
+ async send(text){
+  if(this.turn)throw Error('上一回合尚未結束。');
+  if(!this.current.model)await this.setModel(null);
+  const provider=this.current.provider,driver=await this.provider(provider);
+  const {text:prompt,handedOver}=this.session.prompt(provider,text);
+  const record=this.session.begin({provider,label:PROVIDERS[provider].label,model:this.current.model,effort:this.current.effort,user:text});
+  const started=Date.now();
+  const turn={provider,record,tools:new Map(),error:null};
+  const completion=new Promise(resolve=>{turn.resolve=resolve;});
+  this.turn=turn;
+  if(handedOver.length&&!this.options.json)ui.info('交接 '+handedOver.length+' 個其他模型的回合給 '+PROVIDERS[provider].label);
+  if(!this.options.json)ui.startStream();
+  try{
+   await driver.send({requestId:record.id,prompt,model:this.current.model,effort:this.current.effort||undefined,conversationId:this.session.conversations[provider]||undefined});
+   this.session.markSynced(provider,handedOver);
+  }catch(e){this.turn=null;this.session.finish(record,{status:'error',error:e.message});ui.endStream();throw e;}
+  const result=await completion;
+  this.turn=null;
+  if(!this.options.json)ui.endStream();
+  this.session.finish(record,result);
+  const secs=((Date.now()-started)/1000).toFixed(1);
+  if(result.status==='completed'&&!this.options.json)ui.info(PROVIDERS[provider].label+' · '+this.current.model+' · '+secs+'s');
+  else if(result.status==='cancelled')ui.warn('已中止（'+secs+'s）');
+  else if(result.status!=='completed')ui.error((result.error||'回合失敗')+'（'+secs+'s）');
+  return result;
+ }
+ async stop(){if(!this.turn)return false;const d=this.drivers.get(this.turn.provider);ui.warn('正在中止 '+PROVIDERS[this.turn.provider].label+' …');await d?.cancel().catch(()=>{});return true;}
+ // ---------- info ----------
+ async printStatus(){
+  const s=this.sshState;
+  ui.line(ui.color.bold('OpenCodex CLI '+CLI_VERSION));
+  ui.line('SSH 主機：'+(s?s.profile.name+'（'+s.profile.username+'@'+s.profile.host+'，'+s.platform+'，指紋 '+s.fingerprint+'）':'未連線'));
+  ui.line('Mac 工作目錄：'+this.cwd+'　權限：'+this.permissionMode+'　工作階段：'+this.session.id.slice(0,8));
+  ui.line('目前模型：'+this.label());
+  for(const id of Object.keys(PROVIDERS)){
+   const d=this.drivers.get(id);
+   if(!d){ui.line('  '+PROVIDERS[id].label.padEnd(12)+ui.color.dim('未啟動（/model '+id+' 可啟動）'));continue;}
+   const st=d.status();const auth=st.account?.authenticated?ui.color.green('已登入 '+(st.account.authMethod||'')):ui.color.yellow('未登入'+(st.error?'：'+st.error:''));
+   ui.line('  '+PROVIDERS[id].label.padEnd(12)+(st.connected?'已連線':'已關閉')+'  '+auth+'  模型 '+st.models.length+'  Mac 工具 '+(st.tools?.length||0));
+  }
+ }
+ async printQuota(){
+  for(const d of this.drivers.values()){
+   const q=await d.refreshQuota().catch(e=>({error:e.message}));
+   ui.line(ui.color.bold(PROVIDERS[d.id].label));
+   if(!q){ui.line('  未提供額度資料');continue;}
+   if(q.error)ui.line('  '+ui.color.yellow(q.error));
+   if(q.raw)ui.line('  '+String(q.raw).split('\n').slice(0,30).join('\n  '));
+   const windows=q.buckets?q.buckets.flatMap(b=>[['primary',b.primary],['secondary',b.secondary]].filter(([,w])=>w).map(([k,w])=>({name:(b.name||b.id)+' '+k,...w}))):(q.windows||[]);
+   for(const w of windows){const reset=w.resetsAt?new Date((w.resetsAt>1e12?w.resetsAt:w.resetsAt*1000)).toLocaleString():'';ui.line('  '+String(w.name||w.id||'').padEnd(28)+(w.remainingPercent!=null?'剩餘 '+Math.round(w.remainingPercent)+'%':w.usedPercent!=null?'已用 '+Math.round(w.usedPercent)+'%':'')+(w.windowDurationMins?'  每 '+(w.windowDurationMins>=1440?Math.round(w.windowDurationMins/1440)+' 天':w.windowDurationMins>=60?Math.round(w.windowDurationMins/60)+' 小時':w.windowDurationMins+' 分'):'')+(reset?'  重置 '+reset:''));}
+   if(!windows.length&&!q.raw&&!q.error)ui.line('  供應商未回報額度視窗');
+  }
+  if(!this.drivers.size)ui.line('尚未啟動任何供應商。');
+ }
+ async printModels(all=false){
+  const ids=all?Object.keys(PROVIDERS):[...this.drivers.keys()];
+  const rows=[];let n=0;const index=[];
+  for(const id of ids){
+   let d=this.drivers.get(id);
+   if(!d&&all){try{d=await this.provider(id,{quiet:true});}catch(e){ui.line(ui.color.dim('  '+PROVIDERS[id].label+'：'+e.message));continue;}}
+   if(!d)continue;
+   for(const m of d.models()){n++;index.push({provider:id,model:m.model});const efforts=(m.supportedReasoningEfforts||[]).map(e=>e.reasoningEffort).join('/');rows.push([String(n)+')',id+':'+m.model+(m.isDefault?' *':''),m.displayName!==m.model?m.displayName:'',efforts]);}
+  }
+  if(!rows.length){ui.line('尚無模型；先用 /model codex 或 /model claude 啟動供應商。');return [];}
+  ui.table(rows);return index;
+ }
+ // ---------- slash commands ----------
+ async command(line){
+  const [cmd,...rest]=line.slice(1).trim().split(/\s+/);const arg=rest.join(' ').trim();
+  switch(cmd){
+   case 'help':case '?':ui.line(HELP);return;
+   case 'exit':case 'quit':case 'q':return 'exit';
+   case 'model':{
+    if(arg){const r=await this.setModel(arg);ui.ok('模型 → '+this.label()+(r.info.displayName&&r.info.displayName!==r.model?'（'+r.info.displayName+'）':''));return;}
+    const index=await this.printModels(true);if(!index.length)return;
+    const a=(await ui.question(ui.color.cyan('選擇模型編號（Enter 取消）› '))).trim();const n=Number(a);
+    if(Number.isInteger(n)&&n>=1&&n<=index.length){await this.setModel(index[n-1].provider+':'+index[n-1].model);ui.ok('模型 → '+this.label());}
+    return;
+   }
+   case 'models':await this.printModels(!!arg&&arg==='all');return;
+   case 'effort':{
+    if(!arg){ui.line('目前思考強度：'+(this.current.effort||'（模型預設）')+'　可用值：'+EFFORTS.join('/'));return;}
+    if(arg==='default'||arg==='none'){this.current.effort=null;ui.ok('思考強度 → 模型預設');return;}
+    if(!EFFORTS.includes(arg))throw Error('無效的思考強度：'+arg);
+    const d=this.drivers.get(this.current.provider);const m=d?.models().find(m=>m.model===this.current.model);const supported=(m?.supportedReasoningEfforts||[]).map(e=>e.reasoningEffort);
+    if(supported.length&&!supported.includes(arg))throw Error('模型 '+this.current.model+' 支援的強度：'+supported.join('/'));
+    this.current.effort=arg;ui.ok('思考強度 → '+arg);return;
+   }
+   case 'permission':case 'perm':{
+    if(!arg){ui.line('目前 Mac 工具權限：'+this.permissionMode+'（ask / project / full）');return;}
+    if(!['ask','project','full'].includes(arg))throw Error('權限模式須為 ask、project 或 full。');
+    if(this.turn)throw Error('請先等目前回合結束。');
+    this.permissionMode=arg;const s=cfg.cliSettings();s.permissionMode=arg;cfg.saveCliSettings(s);
+    if(this.drivers.size){ui.info('重新啟動已連線的供應商以套用權限 …');const ids=[...this.drivers.keys()];await this.closeProviders();for(const id of ids)await this.provider(id).catch(e=>ui.error(PROVIDERS[id].label+'：'+e.message));}
+    ui.ok('權限 → '+arg);return;
+   }
+   case 'ssh':await this.sshCommand(rest);return;
+   case 'status':await this.printStatus();return;
+   case 'quota':case 'usage':await this.printQuota();return;
+   case 'cwd':ui.line(this.cwd+'　（變更工作目錄請以 OpenCodex -C <路徑> 重新啟動）');return;
+   case 'new':{if(this.turn)throw Error('請先等目前回合結束。');this.session=new Session({cwd:this.cwd,profileId:this.sshState?.profile.id});ui.ok('已開始新工作階段 '+this.session.id.slice(0,8));return;}
+   case 'sessions':{const items=Session.list();if(!items.length){ui.line('沒有已儲存的工作階段。');return;}ui.table(items.slice(0,20).map(s=>[s.id.slice(0,8),new Date(s.updatedAt).toLocaleString(),s.turns+' 回合',s.title||'']));return;}
+   case 'resume':{if(!arg)throw Error('請提供工作階段 id。');if(this.turn)throw Error('請先等目前回合結束。');this.session=Session.load(arg);ui.ok('已接續 '+this.session.id.slice(0,8)+'：'+this.session.title);const last=[...this.session.turns].reverse().find(t=>t.model);if(last){try{await this.setModel(last.provider+':'+last.model);}catch{}}return;}
+   case 'stop':if(!(await this.stop()))ui.line('目前沒有進行中的回合。');return;
+   default:throw Error('未知指令 /'+cmd+'，輸入 /help 查看。');
+  }
+ }
+ async sshCommand(args){
+  const [sub,...rest]=args;const name=rest.join(' ').trim();
+  const items=cfg.profiles();
+  if(!sub||sub==='list'){
+   if(!items.length){ui.line('尚無 SSH 主機。用 /ssh add 新增。');return;}
+   ui.table(items.map(p=>[(this.sshState?.profile.id===p.id?'● ':'  ')+p.name,p.username+'@'+p.host+':'+(p.port||22),p.authType,p.runtimePlatform||'auto']));
+   return;
+  }
+  if(sub==='status'){await this.printStatus();return;}
+  if(sub==='use'||sub==='connect'){if(!name)throw Error('請提供主機名稱。');await this.connectSsh(name);this.current.model=null;return;}
+  if(sub==='remove'||sub==='rm'||sub==='delete'){
+   const p=items.find(p=>p.name===name||p.id===name);if(!p)throw Error('找不到主機：'+name);
+   if(this.sshState?.profile.id===p.id)throw Error('此主機正在使用中，請先切換到其他主機。');
+   const a=(await ui.question(ui.color.yellow('確定移除 '+p.name+'？[y/N] › '))).trim().toLowerCase();if(!['y','yes'].includes(a))return;
+   cfg.writeJson(path.join(cfg.appSupport,'profiles.json'),items.filter(x=>x.id!==p.id));ui.ok('已移除 '+p.name);return;
+  }
+  if(sub==='add'||sub==='edit'){
+   const previous=sub==='edit'?items.find(p=>p.name===name||p.id===name):null;if(sub==='edit'&&!previous)throw Error('找不到主機：'+name);
+   const q=async(label,def)=>{const a=(await ui.question(ui.color.cyan(label+(def!==undefined&&def!==''?'（'+def+'）':'')+'› '))).trim();return a||def||'';};
+   const input={id:previous?.id||crypto.randomUUID()};
+   input.name=await q('名稱',previous?.name||name);input.host=await q('主機位址',previous?.host);input.port=Number(await q('連接埠',previous?.port||22));input.username=await q('SSH 使用者',previous?.username);
+   const auth=(await q('認證方式 password/key/agent',previous?.authType||'password')).toLowerCase();input.authType=auth;
+   if(auth==='key')input.keyPath=await q('私鑰完整路徑',previous?.keyPath||path.join(os.homedir(),'.ssh/id_ed25519'));
+   input.runtimePlatform=(await q('主機系統 auto/posix/windows',previous?.runtimePlatform||'auto')).toLowerCase();
+   let password;
+   if(auth==='password'){const save=(await q('儲存密碼？y/N',previous?.savePassword?'y':'n')).toLowerCase();input.savePassword=['y','yes'].includes(save);if(input.savePassword){password=await ui.secret('SSH 密碼（留空保留原密碼）：');}}
+   const {validateProfile}=require(path.join(cfg.repoRoot,'src/ssh-profiles.cjs'));const credentials=cfg.mod('profile-credentials.js');const storage=cfg.storage();
+   const profile=credentials.saveCredentialProfile({...validateProfile(input),password:password||undefined},previous||undefined,v=>storage.encryptString(v).toString('base64'),storage.isEncryptionAvailable());
+   const next=previous?items.map(p=>p.id===previous.id?profile:p):[profile,...items];
+   cfg.writeJson(path.join(cfg.appSupport,'profiles.json'),next);ui.ok((previous?'已更新 ':'已新增 ')+profile.name);
+   const use=(await q('立即連線？Y/n','y')).toLowerCase();if(['y','yes'].includes(use)){await this.connectSsh(profile.name);this.current.model=null;}
+   return;
+  }
+  throw Error('用法：/ssh [list|use <名稱>|add|edit <名稱>|remove <名稱>|status]');
+ }
+ // ---------- main loops ----------
+ async repl(){
+  ui.line(ui.color.bold('OpenCodex CLI '+CLI_VERSION)+ui.color.dim('  · /help 查看指令，/model 切換模型（可跨供應商接續同一對話），/ssh 管理主機'));
+  ui.line(ui.color.dim('Mac 工作目錄：'+this.cwd+'　權限：'+this.permissionMode));
+  try{await this.connectSsh();await this.setModel(this.options.model||null);ui.ok('模型 '+this.label());}
+  catch(e){ui.error(e.message);ui.info('可用 /ssh 管理主機、/model 選擇模型後再開始。');}
+  const rl=ui.interface();let interrupts=0;
+  rl.on('SIGINT',()=>{if(this.turn){void this.stop();return;}interrupts++;if(interrupts>=2){void this.shutdown(0);return;}ui.line('');ui.info('再按一次 Ctrl+C 離開，或輸入 /exit');});
+  for(;;){
+   let line;
+   try{line=await ui.question(ui.color.magenta('OpenCodex ')+ui.color.dim('('+this.label()+') ')+ui.color.magenta('› '));}catch{break;}
+   if(line===undefined||line===null)break;
+   interrupts=0;line=line.trim();if(!line)continue;
+   try{
+    if(line.startsWith('/')){if((await this.command(line))==='exit')break;continue;}
+    await this.send(line);
+   }catch(e){ui.endStream();ui.error(e.message);}
+  }
+  await this.shutdown(0);
+ }
+ async once(text){
+  await this.connectSsh();await this.setModel(this.options.model||null);
+  if(!this.options.json)ui.info('模型 '+this.label());
+  const result=await this.send(text);
+  if(this.options.json)process.stdout.write(JSON.stringify({type:'final',status:result.status,sessionId:this.session.id,text:this.turnText()})+'\n');
+  await this.shutdown(result.status==='completed'?0:1);
+ }
+ turnText(){const t=this.session.turns.at(-1);return t?.assistant||'';}
+ async shutdown(code){if(this.shuttingDown)return;this.shuttingDown=true;ui.endStream();this.session?.save();await this.closeProviders();try{this.sshState?.conn.end();}catch{}ui.closeInterface();setTimeout(()=>process.exit(code),200).unref();}
+}
+async function main(){
+ const o=parseArgs(process.argv.slice(2));
+ if(o.version){console.log('OpenCodex CLI '+CLI_VERSION);return;}
+ if(o.help){console.log(HELP);return;}
+ cfg.ensureDirs();
+ const sub=o._[0];
+ if(sub==='ssh'&&(o._[1]===undefined||o._[1]==='list')){const items=cfg.profiles();if(!items.length){console.log('尚無 SSH 主機。執行 OpenCodex ssh add 新增。');return;}ui.table(items.map(p=>[p.name,p.username+'@'+p.host+':'+(p.port||22),p.authType,p.runtimePlatform||'auto']));return;}
+ if(sub==='sessions'){const items=Session.list();if(!items.length){console.log('沒有已儲存的工作階段。');return;}ui.table(items.slice(0,30).map(s=>[s.id.slice(0,8),new Date(s.updatedAt).toLocaleString(),s.turns+' 回合',s.title||'']));return;}
+ const app=new App(o);
+ app.session=o.resume?Session.load(o.resume):new Session({cwd:app.cwd});
+ if(o.resume){const last=[...app.session.turns].reverse().find(t=>t.model);if(last&&!o.model)o.model=last.provider+':'+last.model;}
+ process.on('unhandledRejection',e=>{ui.error('內部錯誤：'+(e?.message||e));});
+ if(sub==='ssh'){await app.sshCommand(o._.slice(1));await app.shutdown(0);return;}
+ if(sub==='models'){await app.connectSsh();await app.printModels(true);await app.shutdown(0);return;}
+ if(sub==='status'){await app.connectSsh();try{await app.provider('codex',{quiet:true});}catch(e){ui.warn('Codex：'+e.message);}await app.printStatus();await app.printQuota();await app.shutdown(0);return;}
+ if(sub==='quota'){await app.connectSsh();for(const id of Object.keys(PROVIDERS)){try{await app.provider(id,{quiet:true});}catch{}}await app.printQuota();await app.shutdown(0);return;}
+ if(o.prompt!==undefined){await app.once(o.prompt||o._.join(' '));return;}
+ if(sub&&!sub.startsWith('/'))throw Error('未知子命令：'+sub+'（輸入 OpenCodex --help）');
+ await app.repl();
+}
+main().catch(e=>{ui.error(e.message||String(e));process.exit(1);});

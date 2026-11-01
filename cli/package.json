@@ -1,0 +1,13 @@
+{
+  "name": "opencodex-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenCodex 終端機版：同一對話接續使用 Codex、Claude Code、Antigravity 與 Grok；工具在這台 Mac 執行。",
+  "bin": {
+    "opencodex": "./bin/opencodex",
+    "OpenCodex": "./bin/opencodex"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
