@@ -382,6 +382,10 @@ async function request(ws,method,params,fromQueue=false){
   }
   if(routing.threadScoped(method,params)||method.startsWith('thread/')||method.startsWith('turn/'))throw Error(bridgeError||'SSH 尚未連線；請開啟側邊欄 SSH 連線。');
  }
+ // The native UI asks for MCP status while opening a conversation, before thread/resume has
+ // loaded it on the remote app-server. Forwarding then fails with "thread not found" and the
+ // renderer shows its generic error page. An unloaded thread simply has no MCP servers yet.
+ if(method==='mcpServerStatus/list'&&params?.threadId&&!runtime?.openCodexThreads?.has(params.threadId))return {data:[],nextCursor:null};
  if(routing.collections.has(method)){
   const owner=runtime;
   if(method==='thread/list'||method==='thread/search')return organization.listPage(profileId,method,params||{},query=>routing.ownedPage(owner.rpc,method,query,known,profileId));
