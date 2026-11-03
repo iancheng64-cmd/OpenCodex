@@ -120,6 +120,8 @@ OpenCodex ssh list | OpenCodex models | OpenCodex status | OpenCodex sessions
 
 互動指令：`/model [供應商:模型]`（無參數開啟所有供應商的模型與思考強度選單）、`/ssh [list|use|add|edit|remove|status]`（無參數開啟主機選單）、`/effort`、`/permission ask|project|full`、`/status`、`/quota`、`/new`、`/sessions`、`/resume <id>`、`/stop`、`/exit`。
 
+`/resume` 的選單同時列出本機 CLI 工作階段與主機上的所有 Codex 對話（App、Codex CLI 或本 CLI 建立的都在內），和一般 Codex 的 resume 一樣可以直接接續；接續主機對話時會先匯入其歷史回合，之後切換到 Claude 等其他供應商也能拿到前文。若該對話正被 OpenCodex App 使用中，會提示先在 App 結束。
+
 跨供應商交接與 App 相同：切換模型後，新供應商會收到它尚未看過的回合紀錄作為背景，紀錄中的工具輸出標示為不受信任資料。各供應商仍維持自己的原生工作階段，所以同一供應商連續對話不重送前文。Antigravity 與 Grok 需要 macOS／Linux 主機；Windows 主機可用 Codex 與 Claude Code。工作階段儲存在 `~/Library/Application Support/OpenCodex/cli/sessions/`。
 
 `--permission ask` 為預設：Mac 工具與 Codex 的命令／檔案變更逐項在終端機確認（`y` 允許、`a` 本次工作階段都允許、`n` 拒絕）；非互動的 `-p` 模式無法確認時一律拒絕，需要工具請改用 `--permission project` 或 `--permission full`。

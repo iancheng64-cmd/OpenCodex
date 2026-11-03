@@ -53,6 +53,17 @@ class CodexDriver{
   }catch(e){await this.stop();throw e;}
   return this.status();
  }
+ // Threads stored on the runtime host (created by this CLI, the App or the host's own Codex CLI).
+ async listThreads(limit=60){
+  const data=[];let cursor;
+  for(let i=0;i<10&&data.length<limit;i++){
+   let r;const params={limit:Math.min(50,limit-data.length),...(cursor?{cursor}:{})};
+   try{r=await this.rpc.request('thread/list',{...params,sortKey:'updated_at'});}catch{r=await this.rpc.request('thread/list',params);}
+   data.push(...(r.data||[]));if(!r.nextCursor||r.nextCursor===cursor||!(r.data||[]).length)break;cursor=r.nextCursor;
+  }
+  return data.filter(t=>t&&typeof t.id==='string'&&!t.ephemeral&&!t.parentThreadId).map(t=>({id:t.id,title:(t.name||String(t.preview||'').replace(/^# Files mentioned by the user:[\s\S]*?## My request:\s*/,'').trim().split('\n')[0]||'（無標題）').slice(0,80),model:t.model||null,effort:t.reasoningEffort||null,updatedAt:Number(t.updatedAt||t.createdAt||0)*1000,cwd:t.cwd||null,source:t.source||t.threadSource||null}));
+ }
+ async readThread(threadId){const r=await this.rpc.request('thread/read',{threadId,includeTurns:true},30000);return r.thread;}
  async listModels(){const data=[];let cursor;for(let i=0;i<20;i++){const r=await this.rpc.request('model/list',cursor?{cursor}:{});data.push(...(r.data||[]));if(!r.nextCursor||r.nextCursor===cursor)break;cursor=r.nextCursor;}return modelSummary({data});}
  status(){return {provider:'codex',connected:!this.closed,runtimeVersion:this.runtimeVersion,account:{...this.account,authenticated:this.account?.authenticated===true&&this.account?.type==='chatgpt',authMethod:this.account?.type==='chatgpt'?'ChatGPT'+(this.account.planType?' · '+this.account.planType:''):this.account?.type||'未登入'},models:this.modelList||[],quota:this.quota,tools:this.tools?.host.status().tools||[],executor:this.environment?.shell?.path};}
  models(){return (this.modelList||[]).map(m=>({...m,provider:'codex'}));}
@@ -125,7 +136,11 @@ class CodexDriver{
     const thread=await this.rpc.request(input.conversationId?'thread/resume':'thread/start',input.conversationId?{threadId:input.conversationId,...base}:{...base,environments:[{environmentId:this.executor.environmentId,cwd:this.cwd}]});
     if(this.run!==run)return;
     run.threadId=thread.thread.id;
-    await this.verifyThreadMcp(run.threadId);
+    // Codex 0.160 resumes a thread with no selected environment; the environment-scoped Mac MCP
+    // stays disabled until turn/start selects this Mac. Verify isolation accordingly.
+    const envs=thread.thread.environments;
+    const dormant=!!input.conversationId&&!(Array.isArray(envs)&&envs.some(e=>e?.environmentId===this.executor.environmentId));
+    await this.verifyThreadMcp(run.threadId,dormant);
     if(this.run!==run)return;
     this.emit({type:'session',conversationId:run.threadId});
     if(run.cancelled){this.run=null;this.emit({type:'done',status:'cancelled',conversationId:run.threadId,requestId:run.requestId});return;}
@@ -136,15 +151,23 @@ class CodexDriver{
     if(run.cancelled)await this.rpc.request('turn/interrupt',{threadId:run.threadId,turnId:run.turnId});
    }catch(e){
     if(this.run!==run)return;
-    const f=runtimeFailure(e);this.run=null;
+    const f=/already has an active writer/i.test(e?.message||'')?{text:'這個對話目前正被另一個用戶端（例如 OpenCodex App）使用；請先在那邊結束或關閉它，再於此接續。'}:runtimeFailure(e);this.run=null;
     this.emit({type:'error',text:f.text});this.emit({type:'done',status:'error',error:f.text,conversationId:run.threadId,requestId:run.requestId});
    }
   });
   return {requestId:run.requestId};
  }
- async verifyThreadMcp(threadId){
+ async verifyThreadMcp(threadId,dormant=false){
   const inventory=[];let cursor;
-  for(let i=0;i<100;i++){const r=await this.rpc.request('mcpServerStatus/list',{threadId,limit:100,...(cursor?{cursor}:{})});if(!Array.isArray(r.data))throw Error('Runtime 未提供有效的 MCP 工具清單。');inventory.push(...r.data);if(!r.nextCursor){validateMacMcpInventory(inventory,this.mcp.name);return;}if(r.nextCursor===cursor)break;cursor=r.nextCursor;}
+  for(let i=0;i<100;i++){
+   const r=await this.rpc.request('mcpServerStatus/list',{threadId,detail:'toolsAndAuthOnly',limit:100,...(cursor?{cursor}:{})},60000);
+   if(!Array.isArray(r.data))throw Error('Runtime 未提供有效的 MCP 工具清單。');inventory.push(...r.data);
+   if(!r.nextCursor){
+    if(dormant){const selected=inventory.find(s=>s.name===this.mcp.name);if(!selected)throw Error('Runtime 未登記 Mac 工具；請重新連線。');validateMacMcpInventory(inventory,selected.runtimeStatus==='disabled'?undefined:this.mcp.name);return;}
+    validateMacMcpInventory(inventory,this.mcp.name);return;
+   }
+   if(r.nextCursor===cursor)break;cursor=r.nextCursor;
+  }
   throw Error('Runtime MCP 工具清單無法完整驗證。');
  }
  async cancel(){

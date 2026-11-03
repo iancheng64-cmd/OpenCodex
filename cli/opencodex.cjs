@@ -225,6 +225,28 @@ class App{
   ui.table(index.map((m,i)=>[String(i+1)+')',m.provider+':'+m.model+(m.isDefault?' *':''),m.displayName!==m.model?m.displayName:'',m.efforts.join('/')]));
   return index;
  }
+ // ---------- sessions (local CLI sessions + Codex threads on the runtime host) ----------
+ when(ts){const d=new Date(ts||0);const same=d.toDateString()===new Date().toDateString();return same?d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):d.toLocaleDateString([],{month:'numeric',day:'numeric'})+' '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}
+ async allSessions(){
+  const local=Session.list().map(s=>({key:'local:'+s.id,title:s.title||'（無標題）',updatedAt:s.updatedAt,detail:s.turns+' 回合 · '+(s.providers.map(p=>PROVIDERS[p]?.label||p).join('+')||'CLI'),codexThreadId:s.codexThreadId}));
+  const known=new Set(local.map(s=>s.codexThreadId).filter(Boolean));
+  let remote=[];
+  try{const d=await this.provider('codex',{quiet:true});remote=(await d.listThreads()).filter(t=>!known.has(t.id)).map(t=>({key:'codex:'+t.id,title:t.title,updatedAt:t.updatedAt,detail:'Codex 主機對話'+(t.model?' · '+t.model:'')}));}
+  catch(e){ui.warn('無法讀取主機上的 Codex 對話：'+e.message);}
+  return [...local,...remote].sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
+ }
+ async resumeAny(key){
+  let session;
+  if(key.startsWith('local:'))session=Session.load(key.slice(6));
+  else if(key.startsWith('codex:')){const d=await this.provider('codex',{quiet:true});const thread=await d.readThread(key.slice(6));session=Session.fromCodexThread(thread,{cwd:this.cwd,profileId:this.sshState?.profile.id});session.save();}
+  else{try{session=Session.load(key);}catch{const d=await this.provider('codex',{quiet:true});const match=(await d.listThreads(200)).find(t=>t.id===key||t.id.startsWith(key));if(!match)throw Error('找不到工作階段：'+key);return this.resumeAny('codex:'+match.id);}}
+  this.session=session;
+  ui.ok('已接續 '+session.title.slice(0,50)+ui.color.dim('（'+session.turns.length+' 回合）'));
+  const last=[...session.turns].reverse().find(t=>t.model);
+  if(last){try{await this.setModel(last.provider+':'+last.model);if(last.effort)this.current.effort=last.effort;ui.info('模型 '+this.label());}catch{}}
+  for(const t of session.turns.slice(-3)){this.tui?.user(t.user);if(t.assistant)for(const [i,l] of t.assistant.split('\n').slice(0,12).entries())ui.line((i?'  ':ui.color.green('• '))+l);}
+  if(session.turns.length>3)ui.line(ui.color.dim('  （僅顯示最後 3 回合）'));
+ }
  // ---------- slash commands ----------
  async command(line){
   const [cmd,...rest]=line.slice(1).trim().split(/\s+/);let arg=rest.join(' ').trim();
@@ -272,16 +294,16 @@ class App{
    case 'quota':case 'usage':await this.printQuota();return;
    case 'cwd':ui.line(this.cwd+'　（變更工作目錄請以 OpenCodex -C <路徑> 重新啟動）');return;
    case 'new':{if(this.turn)throw Error('請先等目前回合結束。');this.session=new Session({cwd:this.cwd,profileId:this.sshState?.profile.id});ui.ok('已開始新工作階段 '+this.session.id.slice(0,8));return;}
-   case 'sessions':{const items=Session.list();if(!items.length){ui.line('沒有已儲存的工作階段。');return;}ui.table(items.slice(0,20).map(s=>[s.id.slice(0,8),new Date(s.updatedAt).toLocaleString(),s.turns+' 回合',s.title||'']));return;}
+   case 'sessions':{const items=await this.allSessions();if(!items.length){ui.line('沒有可接續的工作階段。');return;}ui.table(items.slice(0,30).map(s=>[s.key.startsWith('local:')?'CLI':'Codex',this.when(s.updatedAt),s.detail,s.title.slice(0,60)]));ui.line(ui.color.dim('輸入 /resume 以選單接續。'));return;}
    case 'resume':{
     if(this.turn)throw Error('請先等目前回合結束。');
     if(!arg){
-     const items=Session.list().filter(s=>s.id!==this.session.id);
+     const items=(await this.allSessions()).filter(s=>s.key!=='local:'+this.session.id&&s.key!=='codex:'+(this.session.conversations.codex||''));
      if(!items.length){ui.line('沒有其他可接續的工作階段。');return;}
-     arg=await ui.select({title:'接續哪個工作階段？',items:items.slice(0,30).map(s=>({label:(s.title||'（無標題）').slice(0,50),description:new Date(s.updatedAt).toLocaleString()+' · '+s.turns+' 回合 · '+s.id.slice(0,8),value:s.id}))});
+     arg=await ui.select({title:'接續哪個工作階段？（本機 CLI 與主機上的 Codex 對話）',items:items.slice(0,40).map(s=>({label:s.title.slice(0,60),description:this.when(s.updatedAt)+' · '+s.detail,value:s.key}))});
      if(!arg)return;
     }
-    this.session=Session.load(arg);ui.ok('已接續 '+this.session.id.slice(0,8)+'：'+this.session.title);const last=[...this.session.turns].reverse().find(t=>t.model);if(last){try{await this.setModel(last.provider+':'+last.model);}catch{}}return;}
+    await this.resumeAny(arg);return;}
    case 'stop':if(!(await this.stop()))ui.line('目前沒有進行中的回合。');return;
    default:throw Error('未知指令 /'+cmd+'，輸入 /help 查看。');
   }
@@ -354,6 +376,7 @@ class App{
   this.tui=tui;ui.setSink(tui);tui.start();
   try{await this.connectSsh();await this.setModel(this.options.model||null);}catch(e){ui.error(e.message);ui.info('可用 /ssh 管理主機、/model 選擇模型後再開始。');}
   this.banner();
+  if(this.pendingResume){const id=this.pendingResume;this.pendingResume=null;try{await this.resumeAny(id);}catch(e){ui.error(e.message);}}
   await new Promise(()=>{});
  }
  async runTurn(text){this.tui?.user(text);try{await this.send(text);}catch(e){ui.error(e.message);}}
@@ -378,7 +401,9 @@ class App{
   await this.shutdown(0);
  }
  async once(text){
-  await this.connectSsh();await this.setModel(this.options.model||null);
+  await this.connectSsh();
+  if(this.pendingResume){const id=this.pendingResume;this.pendingResume=null;await this.resumeAny(id);}
+  await this.setModel(this.options.model||null);
   if(!this.options.json)ui.info('模型 '+this.label());
   const result=await this.send(text);
   if(this.options.json)process.stdout.write(JSON.stringify({type:'final',status:result.status,sessionId:this.session.id,text:this.turnText()})+'\n');
@@ -394,10 +419,10 @@ async function main(){
  cfg.ensureDirs();
  const sub=o._[0];
  if(sub==='ssh'&&(o._[1]===undefined||o._[1]==='list')){const items=cfg.profiles();if(!items.length){console.log('尚無 SSH 主機。執行 OpenCodex ssh add 新增。');return;}ui.table(items.map(p=>[p.name,p.username+'@'+p.host+':'+(p.port||22),p.authType,p.runtimePlatform||'auto']));return;}
- if(sub==='sessions'){const items=Session.list();if(!items.length){console.log('沒有已儲存的工作階段。');return;}ui.table(items.slice(0,30).map(s=>[s.id.slice(0,8),new Date(s.updatedAt).toLocaleString(),s.turns+' 回合',s.title||'']));return;}
  const app=new App(o);
- app.session=o.resume?Session.load(o.resume):new Session({cwd:app.cwd});
- if(o.resume){const last=[...app.session.turns].reverse().find(t=>t.model);if(last&&!o.model)o.model=last.provider+':'+last.model;}
+ app.session=new Session({cwd:app.cwd});
+ if(sub==='sessions'){await app.connectSsh();const items=await app.allSessions();if(!items.length){console.log('沒有可接續的工作階段。');}else ui.table(items.slice(0,40).map(s=>[s.key.startsWith('local:')?'CLI':'Codex',app.when(s.updatedAt),s.detail,s.key.replace(/^(local|codex):/,'').slice(0,8),s.title.slice(0,60)]));await app.shutdown(0);return;}
+ if(o.resume){try{app.session=Session.load(o.resume);const last=[...app.session.turns].reverse().find(t=>t.model);if(last&&!o.model)o.model=last.provider+':'+last.model;}catch{app.pendingResume=o.resume;}}
  process.on('unhandledRejection',e=>{ui.error('內部錯誤：'+(e?.message||e));});
  if(sub==='ssh'){await app.sshCommand(o._.slice(1));await app.shutdown(0);return;}
  if(sub==='models'){await app.connectSsh();await app.printModels(true);await app.shutdown(0);return;}
