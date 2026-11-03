@@ -39,7 +39,42 @@ class Session{
   const s=new Session({cwd:cwd||thread.cwd||null,profileId:profileId||null,title,turns,conversations:{codex:thread.id},synced:{codex:turns.map(t=>t.id)},remoteThreadId:thread.id,createdAt:Number(thread.createdAt||0)*1000||Date.now(),updatedAt:Number(thread.updatedAt||0)*1000||Date.now()});
   return s;
  }
- static list(){try{return fs.readdirSync(Session.dir()).filter(f=>f.endsWith('.json')).map(f=>{try{const d=cfg.readJson(path.join(Session.dir(),f));return {id:d.id,title:d.title,updatedAt:d.updatedAt,turns:d.turns?.length||0,cwd:d.cwd,profileId:d.profileId,codexThreadId:d.conversations?.codex||null,providers:[...new Set((d.turns||[]).map(t=>t.provider))]};}catch{return null;}}).filter(Boolean).sort((a,b)=>b.updatedAt-a.updatedAt);}catch{return [];}}
+ // Import a Claude Code transcript read from the runtime host.
+ static fromClaudeSession(id,data,{cwd,profileId,title}={}){
+  const INTRO=/^\s*\[OpenCodex 模型交接\][\s\S]*?紀錄結束。請只回應接下來這則使用者的新訊息：\s*/;
+  const turns=(data?.turns||[]).map(t=>({id:crypto.randomUUID(),provider:'claude',label:'Claude Code',model:'default',effort:null,user:String(t.user||'').replace(INTRO,'').trim()||'（無文字）',assistant:String(t.assistant||'').trim(),tools:[],status:'completed',startedAt:t.at||Date.now(),completedAt:t.at||Date.now()}));
+  const s=new Session({cwd:cwd||null,profileId:profileId||null,title:(title||turns[0]?.user||'').replace(/\s+/g,' ').slice(0,60),turns,conversations:{claude:id},synced:{claude:turns.map(t=>t.id)}});
+  return s;
+ }
+ // Merge the App's unified-handoff records (Claude / Grok / Antigravity turns anchored to a Codex thread).
+ mergeAppHandoff(threadId,profileId){
+  const INTRO=/^\s*\[OpenCodex 模型交接\][\s\S]*?紀錄結束。請只回應接下來這則使用者的新訊息：\s*/;
+  const sources=[['claude',path.join(cfg.appSupport,'handoff/native-claude-threads.json'),'Claude Code'],['grok',path.join(cfg.appSupport,'handoff/grok/native-claude-threads.json'),'Grok'],['antigravity',path.join(cfg.appSupport,'handoff/antigravity/native-claude-threads.json'),'Antigravity']];
+  let merged=0;
+  for(const [provider,file,label] of sources){
+   let entry;try{entry=cfg.readJson(file,{}).entries?.[threadId];}catch{continue;}
+   if(!entry||entry.deleted||(profileId&&entry.profile&&entry.profile!==profileId))continue;
+   if(entry.conversationId)this.conversations[provider]=entry.conversationId;
+   const known=new Set(this.turns.map(t=>t.id));
+   for(const t of entry.thread?.turns||[]){
+    if(known.has(t.id))continue;
+    const items=t.items||[];
+    const user=items.filter(i=>i.type==='userMessage').flatMap(i=>(i.content||[]).filter(c=>c.type==='text').map(c=>c.text)).join('\n').replace(INTRO,'').trim();
+    const assistant=items.filter(i=>i.type==='agentMessage'&&i.text).map(i=>i.text).join('\n\n').trim();
+    if(!user&&!assistant)continue;
+    const tools=items.filter(i=>i.type==='mcpToolCall').map(i=>({title:i.tool||'tool',status:i.status==='failed'||i.error?'failed':'completed',output:String((i.result?.content||[]).filter(c=>c.type==='text').map(c=>c.text).join('\n')).slice(-4000)}));
+    this.turns.push({id:t.id||crypto.randomUUID(),provider,label,model:entry.thread.model||null,effort:entry.thread.reasoningEffort||null,user:user||'（無文字）',assistant,tools,status:t.status==='inProgress'?'interrupted':'completed',startedAt:Number(t.startedAt||0)*1000||0,completedAt:Number(t.completedAt||0)*1000||0});
+    merged++;
+   }
+  }
+  if(merged){
+   this.turns.sort((a,b)=>(a.startedAt||0)-(b.startedAt||0));
+   // The App already handed earlier turns to each provider; treat everything before a provider's last turn as seen by it.
+   for(const provider of new Set(this.turns.map(t=>t.provider))){const last=this.turns.map(t=>t.provider).lastIndexOf(provider);this.synced[provider]=this.turns.slice(0,last+1).map(t=>t.id);}
+  }
+  return merged;
+ }
+ static list(){try{return fs.readdirSync(Session.dir()).filter(f=>f.endsWith('.json')).map(f=>{try{const d=cfg.readJson(path.join(Session.dir(),f));return {id:d.id,title:d.title,updatedAt:d.updatedAt,turns:d.turns?.length||0,cwd:d.cwd,profileId:d.profileId,codexThreadId:d.conversations?.codex||null,claudeId:d.conversations?.claude||null,providers:[...new Set((d.turns||[]).map(t=>t.provider))]};}catch{return null;}}).filter(Boolean).sort((a,b)=>b.updatedAt-a.updatedAt);}catch{return [];}}
  save(){if(!this.turns.length)return;this.updatedAt=Date.now();cfg.writeJson(Session.file(this.id),{id:this.id,createdAt:this.createdAt,updatedAt:this.updatedAt,cwd:this.cwd,profileId:this.profileId,title:this.title,turns:this.turns,conversations:this.conversations,synced:this.synced,remoteThreadId:this.remoteThreadId||null});}
  get providers(){return [...new Set(this.turns.map(t=>t.provider))];}
  // Build the prompt a provider should receive, including turns it has not yet seen.

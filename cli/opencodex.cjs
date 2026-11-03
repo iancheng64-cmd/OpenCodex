@@ -227,19 +227,36 @@ class App{
  }
  // ---------- sessions (local CLI sessions + Codex threads on the runtime host) ----------
  when(ts){const d=new Date(ts||0);const same=d.toDateString()===new Date().toDateString();return same?d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):d.toLocaleDateString([],{month:'numeric',day:'numeric'})+' '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}
+ // Providers the App handed a Codex thread to (from its unified-handoff records on this Mac).
+ appHandoffProviders(){
+  const map=new Map();const profile=this.sshState?.profile.id;
+  for(const [provider,file] of [['claude','handoff/native-claude-threads.json'],['grok','handoff/grok/native-claude-threads.json'],['antigravity','handoff/antigravity/native-claude-threads.json']]){
+   let entries;try{entries=cfg.readJson(path.join(cfg.appSupport,file),{}).entries||{};}catch{continue;}
+   for(const [id,e] of Object.entries(entries)){if(e.deleted||(profile&&e.profile&&e.profile!==profile))continue;const rec=map.get(id)||{providers:new Set(),claudeSessions:new Set()};rec.providers.add(provider);if(provider==='claude'&&e.conversationId)rec.claudeSessions.add(e.conversationId);map.set(id,rec);}
+  }
+  return map;
+ }
  async allSessions(){
-  const local=Session.list().map(s=>({key:'local:'+s.id,title:s.title||'（無標題）',updatedAt:s.updatedAt,detail:s.turns+' 回合 · '+(s.providers.map(p=>PROVIDERS[p]?.label||p).join('+')||'CLI'),codexThreadId:s.codexThreadId}));
-  const known=new Set(local.map(s=>s.codexThreadId).filter(Boolean));
-  let remote=[];
-  try{const d=await this.provider('codex',{quiet:true});remote=(await d.listThreads()).filter(t=>!known.has(t.id)).map(t=>({key:'codex:'+t.id,title:t.title,updatedAt:t.updatedAt,detail:'Codex 主機對話'+(t.model?' · '+t.model:'')}));}
-  catch(e){ui.warn('無法讀取主機上的 Codex 對話：'+e.message);}
+  const local=Session.list().filter(s=>!this.sshState||!s.profileId||s.profileId===this.sshState.profile.id).map(s=>({key:'local:'+s.id,title:s.title||'（無標題）',updatedAt:s.updatedAt,detail:s.turns+' 回合 · '+(s.providers.map(p=>PROVIDERS[p]?.label||p).join('+')||'CLI'),codexThreadId:s.codexThreadId,claudeId:s.claudeId}));
+  const knownCodex=new Set(local.map(s=>s.codexThreadId).filter(Boolean)),knownClaude=new Set(local.map(s=>s.claudeId).filter(Boolean));
+  const handoff=this.appHandoffProviders();for(const rec of handoff.values())for(const id of rec.claudeSessions)knownClaude.add(id);
+  const [codexResult,claudeResult]=await Promise.allSettled([
+   this.provider('codex',{quiet:true}).then(d=>d.listThreads()),
+   this.provider('claude',{quiet:true}).then(d=>d.listSessions()),
+  ]);
+  const remote=[];
+  if(codexResult.status==='fulfilled')remote.push(...codexResult.value.filter(t=>!knownCodex.has(t.id)).map(t=>{const h=handoff.get(t.id);const names=['Codex',...(h?[...h.providers].map(p=>PROVIDERS[p].label):[])];return {key:'codex:'+t.id,title:t.title,updatedAt:t.updatedAt,detail:names.join('+')+(t.model?' · '+t.model:'')};}));
+  else ui.warn('無法讀取主機上的 Codex 對話：'+codexResult.reason?.message);
+  if(claudeResult.status==='fulfilled')remote.push(...claudeResult.value.filter(s=>!knownClaude.has(s.id)).map(s=>({key:'claude:'+s.id,title:s.title,updatedAt:s.updatedAt,detail:'Claude Code'+(s.cwd?' · '+s.cwd:'')})));
+  else ui.warn('無法讀取主機上的 Claude Code 對話：'+claudeResult.reason?.message);
   return [...local,...remote].sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
  }
  async resumeAny(key){
   let session;
   if(key.startsWith('local:'))session=Session.load(key.slice(6));
-  else if(key.startsWith('codex:')){const d=await this.provider('codex',{quiet:true});const thread=await d.readThread(key.slice(6));session=Session.fromCodexThread(thread,{cwd:this.cwd,profileId:this.sshState?.profile.id});session.save();}
-  else{try{session=Session.load(key);}catch{const d=await this.provider('codex',{quiet:true});const match=(await d.listThreads(200)).find(t=>t.id===key||t.id.startsWith(key));if(!match)throw Error('找不到工作階段：'+key);return this.resumeAny('codex:'+match.id);}}
+  else if(key.startsWith('codex:')){const d=await this.provider('codex',{quiet:true});const thread=await d.readThread(key.slice(6));session=Session.fromCodexThread(thread,{cwd:this.cwd,profileId:this.sshState?.profile.id});const merged=session.mergeAppHandoff(thread.id,this.sshState?.profile.id);if(merged)ui.info('已併入 App 中其他模型的 '+merged+' 個回合');session.save();}
+  else if(key.startsWith('claude:')){const d=await this.provider('claude',{quiet:true});const id=key.slice(7);const data=await d.readSession(id);if(!data?.found)throw Error('主機上找不到這個 Claude Code 工作階段。');session=Session.fromClaudeSession(id,data,{cwd:this.cwd,profileId:this.sshState?.profile.id});session.save();}
+  else{try{session=Session.load(key);}catch{const [codex,claude]=await Promise.allSettled([this.provider('codex',{quiet:true}).then(d=>d.listThreads(200)),this.provider('claude',{quiet:true}).then(d=>d.listSessions(200))]);const c=codex.status==='fulfilled'&&codex.value.find(t=>t.id===key||t.id.startsWith(key));if(c)return this.resumeAny('codex:'+c.id);const s=claude.status==='fulfilled'&&claude.value.find(t=>t.id===key||t.id.startsWith(key));if(s)return this.resumeAny('claude:'+s.id);throw Error('找不到工作階段：'+key);}}
   this.session=session;
   ui.ok('已接續 '+session.title.slice(0,50)+ui.color.dim('（'+session.turns.length+' 回合）'));
   const last=[...session.turns].reverse().find(t=>t.model);
@@ -294,7 +311,7 @@ class App{
    case 'quota':case 'usage':await this.printQuota();return;
    case 'cwd':ui.line(this.cwd+'　（變更工作目錄請以 OpenCodex -C <路徑> 重新啟動）');return;
    case 'new':{if(this.turn)throw Error('請先等目前回合結束。');this.session=new Session({cwd:this.cwd,profileId:this.sshState?.profile.id});ui.ok('已開始新工作階段 '+this.session.id.slice(0,8));return;}
-   case 'sessions':{const items=await this.allSessions();if(!items.length){ui.line('沒有可接續的工作階段。');return;}ui.table(items.slice(0,30).map(s=>[s.key.startsWith('local:')?'CLI':'Codex',this.when(s.updatedAt),s.detail,s.title.slice(0,60)]));ui.line(ui.color.dim('輸入 /resume 以選單接續。'));return;}
+   case 'sessions':{const items=await this.allSessions();if(!items.length){ui.line('沒有可接續的工作階段。');return;}ui.table(items.slice(0,30).map(s=>[s.key.startsWith('local:')?'CLI':s.key.startsWith('claude:')?'Claude':'Codex',this.when(s.updatedAt),s.detail,s.title.slice(0,60)]));ui.line(ui.color.dim('輸入 /resume 以選單接續。'));return;}
    case 'resume':{
     if(this.turn)throw Error('請先等目前回合結束。');
     if(!arg){
@@ -421,7 +438,7 @@ async function main(){
  if(sub==='ssh'&&(o._[1]===undefined||o._[1]==='list')){const items=cfg.profiles();if(!items.length){console.log('尚無 SSH 主機。執行 OpenCodex ssh add 新增。');return;}ui.table(items.map(p=>[p.name,p.username+'@'+p.host+':'+(p.port||22),p.authType,p.runtimePlatform||'auto']));return;}
  const app=new App(o);
  app.session=new Session({cwd:app.cwd});
- if(sub==='sessions'){await app.connectSsh();const items=await app.allSessions();if(!items.length){console.log('沒有可接續的工作階段。');}else ui.table(items.slice(0,40).map(s=>[s.key.startsWith('local:')?'CLI':'Codex',app.when(s.updatedAt),s.detail,s.key.replace(/^(local|codex):/,'').slice(0,8),s.title.slice(0,60)]));await app.shutdown(0);return;}
+ if(sub==='sessions'){await app.connectSsh();const items=await app.allSessions();if(!items.length){console.log('沒有可接續的工作階段。');}else ui.table(items.slice(0,40).map(s=>[s.key.startsWith('local:')?'CLI':s.key.startsWith('claude:')?'Claude':'Codex',app.when(s.updatedAt),s.detail,s.key.replace(/^(local|codex|claude):/,'').slice(0,8),s.title.slice(0,60)]));await app.shutdown(0);return;}
  if(o.resume){try{app.session=Session.load(o.resume);const last=[...app.session.turns].reverse().find(t=>t.model);if(last&&!o.model)o.model=last.provider+':'+last.model;}catch{app.pendingResume=o.resume;}}
  process.on('unhandledRejection',e=>{ui.error('內部錯誤：'+(e?.message||e));});
  if(sub==='ssh'){await app.sshCommand(o._.slice(1));await app.shutdown(0);return;}
