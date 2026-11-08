@@ -9,7 +9,7 @@ require('./bundle-check.cjs').verify(res);
 const running=cp.execFileSync('ps',['-axo','comm='],{encoding:'utf8'}).split('\n');
 if(running.some(s=>s.trim().startsWith(app+'/')))throw Error('Close the development app before refreshing its bundle.');
 const a=archive(file),pkg=JSON.parse(a.read('package.json'));
-if(pkg.name!=='opencodex-desktop'||!['0.4.1','0.4.2','0.4.3','0.4.4','0.4.5','0.4.6','0.4.7','0.4.8','0.4.9','0.4.10','0.4.11','0.4.12','0.4.13','0.4.14','0.4.15'].includes(pkg.openCodexVersion)||pkg.codexBuildNumber!=='20398')throw Error('Unrecognized native baseline');
+if(pkg.name!=='opencodex-desktop'||!['0.4.1','0.4.2','0.4.3','0.4.4','0.4.5','0.4.6','0.4.7','0.4.8','0.4.9','0.4.10','0.4.11','0.4.12','0.4.13','0.4.14','0.4.15','0.4.16'].includes(pkg.openCodexVersion)||pkg.codexBuildNumber!=='20398')throw Error('Unrecognized native baseline');
 const nativePreload=a.read('.vite/build/preload.js').toString();
 const marker=";(()=>{\n const {ipcRenderer,contextBridge}=require('electron');";
 const offset=nativePreload.indexOf(marker);
@@ -17,11 +17,11 @@ if(offset<0||offset!==nativePreload.lastIndexOf(marker))throw Error('OpenCodex p
 let preload=fs.readFileSync(path.join(root,'src/native-preload.cjs'),'utf8');
 preload=preload.replace("/*OPEN_CODEX_STYLES*/''",JSON.stringify(fs.readFileSync(path.join(root,'src/connections.css'),'utf8')));
 preload=preload.replace("/*OPEN_CODEX_PANEL*/''",JSON.stringify(fs.readFileSync(path.join(root,'src/connections.html'),'utf8')));
-pkg.openCodexVersion='0.4.15';
+pkg.openCodexVersion='0.4.16';
 const changes={'package.json':JSON.stringify(pkg),'.vite/build/preload.js':nativePreload.slice(0,offset)+preload};
 for(const name of fs.readdirSync(path.join(root,'src'))){
  if(['bridge-adapter.cjs','native-preload.cjs'].includes(name))continue;
- if(!a.entries['opencodex/'+name]&&!['agent-environment.cjs','native-goal-guard.cjs','credential-migrate.c','native-claude.cjs','native-profile.cjs','native-agents.cjs','native-tool-owners.cjs','native-helper-cleanup.cjs','native-history.cjs','native-organization.cjs','native-mcp.cjs','native-subagents.cjs','native-run-context.cjs','native-agent-runs.cjs','native-connection.cjs','native-hooks-client.cjs','native-hooks-inventory.cjs','native-hooks-mcp.cjs','native-hooks-relay.cjs','native-hooks-runtime.cjs','native-hooks-service.cjs','native-permission-catalog.cjs','native-permissions-input.cjs','native-permissions-process-gate.cjs','native-permissions-tools.cjs','native-permissions-service.cjs','native-permissions-worker.cjs','native-permissions-dispatch.cjs','native-permissions-runtime.cjs','native-app-context.cjs','native-input.cjs','native-config-mutations.cjs','native-guardian.cjs','native-guardian-runtime.cjs','native-handoff.cjs','native-peer-reconnect.cjs','unified-handoff.cjs','external-providers.cjs','composio.cjs','native-sessions.cjs','native-export.cjs'].includes(name))throw Error('Unexpected new bundled source: '+name);
+ if(!a.entries['opencodex/'+name]&&!['agent-environment.cjs','native-goal-guard.cjs','credential-migrate.c','native-claude.cjs','native-profile.cjs','native-agents.cjs','native-tool-owners.cjs','native-helper-cleanup.cjs','native-history.cjs','native-organization.cjs','native-mcp.cjs','native-subagents.cjs','native-run-context.cjs','native-agent-runs.cjs','native-connection.cjs','native-hooks-client.cjs','native-hooks-inventory.cjs','native-hooks-mcp.cjs','native-hooks-relay.cjs','native-hooks-runtime.cjs','native-hooks-service.cjs','native-permission-catalog.cjs','native-permissions-input.cjs','native-permissions-process-gate.cjs','native-permissions-tools.cjs','native-permissions-service.cjs','native-permissions-worker.cjs','native-permissions-dispatch.cjs','native-permissions-runtime.cjs','native-app-context.cjs','native-input.cjs','native-config-mutations.cjs','native-guardian.cjs','native-guardian-runtime.cjs','native-handoff.cjs','native-peer-reconnect.cjs','unified-handoff.cjs','external-providers.cjs','composio.cjs','native-sessions.cjs','native-export.cjs','native-rollouts.cjs'].includes(name))throw Error('Unexpected new bundled source: '+name);
  changes['opencodex/'+name]=fs.readFileSync(path.join(root,'src',name));
 }
 const rendererPath='webview/assets/app-primary-2a670e99a60c.js';

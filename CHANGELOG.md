@@ -1,5 +1,18 @@
 # 變更紀錄
 
+## 0.4.16 — 2026-11-08（預覽版）
+
+### 把 0.4.15 的五項限制修掉
+- **跨主機接續舊對話**：在 A 主機跑過的對話，連到 B 主機後直接送出下一則訊息即可在 B 接續，模型看得到完整前文。連線中的主機每一個對話的 rollout（引擎自己的 JSONL 紀錄）會鏡像到這台 Mac（`~/Library/Application Support/OpenCodex/native-rollouts`，gzip，每回合結束後更新）；送訊息時介面卡把鏡像上傳到目前主機的 `CODEX_HOME/sessions/YYYY/MM/DD/`，再以該路徑 `thread/resume`。這版之前就快取、但還沒有鏡像的對話，則由本機快取的歷史合成 rollout（使用者／助理訊息、推理摘要、指令與工具呼叫）後上傳。接續成功後對話改記在新主機，失敗則自動改回原主機。子代理執行緒不能單獨接續。
+- **SSH 連線中送訊息不再回「SSH 尚未連線」**：`turn/start`、`turn/steer`、`thread/start`、`thread/resume`、`thread/fork`、`review/start` 在 SSH 仍在連線或自動重連時，介面卡會等連線完成（最多 60 秒）再送出，而不是立刻失敗。
+- **工具啟動中的「專案工具初始化失敗」**：專案工具（workspace）切換進行中時，thread 層級請求會等它完成再判斷成敗；SSH 剛連上、Mac Executor 與工具通道尚未就緒時，開啟對話也會先等（最多 30 秒）而不是報錯。
+- **側欄匯出列不再換行**：「匯出為 Markdown／匯出此對話／匯出全部」改為三欄固定版面，窄側欄時文字截斷而不換行。
+- **佇列「由於你中斷了回應，佇列已暫停」橫幅**：確認為視窗原生行為——只有回合以「中斷」狀態結束時才會標記本機佇列暫停，與回合清單排序無關；按「繼續」即恢復。本機佇列通常源自連線切換當下一次送出失敗，上述等待連線的改動減少了這個起因。
+
+### 驗證（對已簽章的建置實測）
+- `cross-host-e2e`：alpha 主機兩回合 → 鏡像 → 切到 beta → 送第三則：rollout 出現在 beta 的 sessions、beta 引擎讀回三回合、模型輸入含前文、beta 清單列出該對話；beta 對話刪除鏡像後切回 alpha 接續（合成 rollout）亦成功。
+- `native-rollouts-test` 6/6；`queue-ui-e2e`、`parallel-sessions-e2e`、`standalone-flow-e2e`、`offline-history-e2e` 回歸通過。
+
 ## 0.4.15 — 2026-11-07（預覽版）
 
 ### 多重 Session 並行與原生功能補齊

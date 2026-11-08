@@ -1,4 +1,4 @@
-# OpenCodex 0.4.15 · 預覽版
+# OpenCodex 0.4.16 · 預覽版
 
 OpenCodex 是 macOS 上的獨立 AI 工作介面：保留原生對話、側邊欄與模型選單，讓同一個對話接續使用 Codex、Claude Code、Antigravity CLI 與 Grok CLI。模型可以在 SSH 伺服器運行，檔案與工具則透過 App 內建的 Mac 執行端工作。
 
@@ -10,7 +10,7 @@ OpenCodex 是 macOS 上的獨立 AI 工作介面：保留原生對話、側邊�
 
 ## 安裝與更新
 
-1. 從本專案 Releases 下載最新版 DMG（目前發布為 `OpenCodex-0.4.15.dmg`）；同版提供來源 ZIP、SHA-256 及驗證 JSON。
+1. 從本專案 Releases 下載最新版 DMG（目前發布為 `OpenCodex-0.4.16.dmg`）；同版提供來源 ZIP、SHA-256 及驗證 JSON。
 2. 關閉原有 OpenCodex，開啟 DMG，將 `OpenCodex.app` 拖到 Applications。
 3. 啟動後在設定加入 SSH 主機、使用者、認證方式與本機專案資料夾。
 4. 首次連線核對 SSH 指紋；依工具需要授予 macOS 輔助使用、螢幕錄製或檔案存取權限。
@@ -117,7 +117,7 @@ Grok Bot 官方說明中，Auto 可能使用包括 Opus 5.5 在內的後端模�
 
 保留原生對話、側邊欄、模型選單、工具卡片與適用的工作區功能，新增統一路由、前文交接、Mac 工具橋接、全帳號用量與 Composio。外部供應商的附件、工具、模型與回合事件仍受各自 CLI 能力限制。
 
-對話紀錄存在主機上，也會在連線後自動同步到這台 Mac 的本機快取（`~/Library/Application Support/OpenCodex/native-history`）。沒有 SSH 連線時，每一台主機的過去對話仍列在側邊欄並可開啟閱讀（唯讀）；側邊欄「所有 AI 帳號用量」區的「匯出目前對話」「匯出全部」會把對話匯出成 Markdown 到「下載項目／OpenCodex 對話匯出」，離線也可用。接續（送出新訊息）仍需連到該對話所屬的主機。
+對話紀錄存在主機上，也會在連線後自動同步到這台 Mac 的本機快取（`~/Library/Application Support/OpenCodex/native-history`）。沒有 SSH 連線時，每一台主機的過去對話仍列在側邊欄並可開啟閱讀（唯讀）；側邊欄「所有 AI 帳號用量」區的「匯出目前對話」「匯出全部」會把對話匯出成 Markdown 到「下載項目／OpenCodex 對話匯出」，離線也可用。要接續（送出新訊息）不必連回原主機：連線中的主機會把每個對話的 rollout 鏡像到這台 Mac（`native-rollouts`），在另一台主機開啟該對話並送出訊息時，介面卡會把鏡像上傳到目前主機的 `CODEX_HOME/sessions` 並以該檔案恢復對話，模型看得到完整前文；更早之前只有快取、沒有鏡像的對話則由快取合成 rollout 後上傳（子代理執行緒除外）。
 
 Hooks、Guardian 自動審批及自訂權限需要對應修改版引擎能力標記。未回報能力的引擎不會被當成支援。完整 ChatGPT 功能、所有雲端服務、所有第三方插件、自訂權限完整 GUI 授權流程，以及跨版本 TCC 授權保留，均未完成完整驗收。
 

@@ -76,7 +76,7 @@
    top.append(make('strong','','所有 AI 帳號用量'),refresh);slot.append(top);
    // Export works offline from the local history cache, so conversations are never locked inside the App.
    const exportRow=make('div','oc-row oc-export'),exportNote=make('div','oc-muted oc-export-note'),current=state.lastThread;
-   const one=make('button','oc-quiet','匯出目前對話'),every=make('button','oc-quiet','匯出全部');
+   const one=make('button','oc-quiet','匯出此對話'),every=make('button','oc-quiet','匯出全部');
    one.type='button';every.type='button';one.disabled=!current;one.title=current?'匯出「'+(current.name||'未命名對話')+'」為 Markdown':'先開啟一個對話';every.title='把這台 Mac 記得的所有對話各匯出成一個 Markdown 檔';
    const runExport=(button,input)=>e=>{e.stopPropagation();one.disabled=true;every.disabled=true;exportNote.textContent='匯出中…';invoke('export-thread',input).then(r=>{exportNote.textContent=r.files.length?'已匯出 '+r.files.length+' 個檔案到 '+r.dir+(r.skipped?'（'+r.skipped+' 個對話沒有可用紀錄）':''):'沒有可匯出的對話紀錄。';}).catch(e=>{exportNote.textContent=(e.message||String(e)).replace(/^Error invoking remote method '[^']+': Error: /,'');}).finally(()=>{one.disabled=!state.lastThread;every.disabled=false;});};
    one.onclick=runExport(one,{threadId:current?.id});every.onclick=runExport(every,{all:true});

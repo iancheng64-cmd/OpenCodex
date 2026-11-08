@@ -1,4 +1,4 @@
-"""Package the 0.4.15 preview as a verified DMG in ~/Downloads. Does NOT install to /Applications."""
+"""Package the 0.4.16 preview as a verified DMG in ~/Downloads. Does NOT install to /Applications."""
 from pathlib import Path
 import subprocess, hashlib, json, plistlib, shutil, datetime, importlib.util
 spec=importlib.util.spec_from_file_location('package_storage',Path(__file__).with_name('package-storage.py'))
@@ -6,7 +6,7 @@ storage=importlib.util.module_from_spec(spec);spec.loader.exec_module(storage)
 root=Path(__file__).resolve().parent.parent
 downloads=Path.home()/'Downloads'
 source=root/'build/OpenCodex.app'
-version='0.4.15'
+version='0.4.16'
 dmg=downloads/f'OpenCodex-{version}.dmg'
 def run(args): subprocess.run(args,check=True,cwd=root)
 def sha(p):

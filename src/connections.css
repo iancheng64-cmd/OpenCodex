@@ -38,4 +38,4 @@
 @media(prefers-reduced-transparency:reduce){.oc-panel::backdrop{backdrop-filter:none;background:#0008}}
 @media(prefers-reduced-motion:reduce){.oc-panel *{animation:none!important;transition:none!important}}
 
-#opencodex-sidebar-quota .oc-export{justify-content:flex-start;gap:6px;margin-top:8px;flex-wrap:wrap}#opencodex-sidebar-quota .oc-export-note{margin-top:2px;overflow-wrap:anywhere}
+#opencodex-sidebar-quota .oc-export{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:6px;margin-top:8px}#opencodex-sidebar-quota .oc-export>span{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#opencodex-sidebar-quota .oc-export .oc-quiet{padding:4px 6px;font-size:11px;white-space:nowrap}#opencodex-sidebar-quota .oc-export-note{margin-top:2px;overflow-wrap:anywhere}

@@ -53,7 +53,7 @@ async function launch({settings={},profiles=[{name:'loopback'}],label='isolated'
     input.tools=input.tools||input.input?.filter(i=>i.type==='additional_tools').flatMap(i=>i.tools)||[];
     const last=input.input.at(-1),afterTool=['function_call_output','custom_tool_call_output'].includes(last?.type);
     const text=userText(input),hold=/\[hold:([A-Za-z0-9-]+)\]/.exec(text)?.[1]||null;
-    const record={turnId:metadata.turn_id,afterTool,hold,tool:/\[tool\]/.test(text),text:text.slice(0,120),at:Date.now()};records.push(record);
+    const record={turnId:metadata.turn_id,afterTool,hold,tool:/\[tool\]/.test(text),text:text.slice(0,120),inputItems:input.input.length,at:Date.now()};records.push(record);
     if(afterTool){record.output=JSON.stringify(last).slice(0,1200);return send(res,input,final('TOOL-DONE'));}
     if(hold){if(held.has(hold))held.get(hold).res.destroy();held.set(hold,{res,input,at:Date.now()});return;}
     if(record.tool){const call=macCall(input,'mac_fs_read',{path:path.join(project,'marker.txt')});record.offered=!!call;return send(res,input,call||final('NO-MAC-TOOLS'));}

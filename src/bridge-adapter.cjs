@@ -75,6 +75,9 @@ exports.openCodexWatchServerTurns = function(runtime, deps, {adoptable=()=>true,
 exports.openCodexRequest = async function(runtime, deps, method, params = {}) {
  if(runtime.closed) throw new Error('SSH 連線已中斷，請重新連線。');
  runtime.openCodexMultiSession=true;runtime.runs??=new Map();runtime.openCodexSubagentsByThread??=new Map();
+ // A project-tools (workspace) switch in progress is not a failure: wait for it to settle first.
+ if(runtime.openCodexWorkspaceTransition){const end=Date.now()+90000;while(runtime.openCodexWorkspaceTransition&&!runtime.closed&&Date.now()<end)await new Promise(resolve=>setTimeout(resolve,100));}
+ if(runtime.closed)throw new Error('SSH 連線已中斷，請重新連線。');
  if(runtime.openCodexWorkspaceFailed)throw Error('專案工具初始化失敗，請重新選擇專案或重新連線。');
  if(method.startsWith('thread/queue/'))throw Error('排隊訊息必須由 OpenCodex 排程，不能交由遠端自動執行。');
  const custom=runtime.permissionMode?.startsWith('custom:');
@@ -97,6 +100,9 @@ exports.openCodexRequest = async function(runtime, deps, method, params = {}) {
   }
  }
  if(method==='thread/start'||method==='thread/resume'||method==='thread/fork'){
+  // The executor and tool channel finish starting a few seconds after SSH connects; opening a
+  // conversation in that window waits for them instead of failing.
+  if(!runtime.executor?.isRunning||!runtime.mcp){const end=Date.now()+30000;while((!runtime.executor?.isRunning||!runtime.mcp)&&!runtime.closed&&Date.now()<end)await new Promise(resolve=>setTimeout(resolve,100));}
   if(!runtime.executor?.isRunning||!runtime.mcp)throw new Error('Mac Executor 與工具通道尚未就緒。');
   if((p.threadId&&runtime.runs.has(p.threadId))||(!runtime.openCodexMultiSession&&runtime.run))throw new Error('Runtime 正在執行工作。');
   const timed=(stage,fn)=>openCodexTimed(deps,method,stage,fn);

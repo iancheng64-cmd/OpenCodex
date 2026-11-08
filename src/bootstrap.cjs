@@ -354,6 +354,44 @@ function notifyRemoteState(){
  publish();
 }
 const remoteThreadCache=new (require('./native-history.cjs').NativeHistory)(path.join(root,'native-history'),{onError:error=>audit('native-history-error',{message:error.message})});
+const nativeRollouts=require('./native-rollouts.cjs');
+const rollouts=new nativeRollouts.NativeRollouts(path.join(root,'native-rollouts'),{onError:error=>audit('native-rollouts-error',{message:error.message})});
+const HANDOVER=new Set(['turn/start','review/start']);
+// Continue another host's conversation on the connected host: its rollout (the local mirror, or
+// one synthesized from the cached history) is uploaded into this host's sessions directory. The
+// resume that follows loads it by that path. The owner flips first so that resume passes the
+// ownership checks, and flips back if the resume fails.
+// The host's CODEX_HOME: from a rollout path its engine reported (this Mac's records, then its
+// list), else the login shell. Tests never fall back to the shell: that could be the real ~/.codex.
+async function remoteCodexHome(owner,to){
+ const fromKnown=nativeRollouts.codexHomeFromPaths(Object.values(known).filter(t=>t.profile===to&&!t.deleted).map(t=>t.summary?.path));
+ if(fromKnown)return fromKnown;
+ try{const page=await owner.rpc.request('thread/list',{limit:20,archived:false,useStateDbOnly:true},20000);const fromList=nativeRollouts.codexHomeFromPaths((page?.data||[]).map(t=>t?.path||t?.thread?.path));if(fromList)return fromList;}
+ catch(error){audit('handover-list-failed',{message:String(error.message).slice(0,200)});}
+ if(process.argv.includes('--opencodex-test'))throw Error('測試模式下無法判斷目前主機的 CODEX_HOME。');
+ return nativeRollouts.remoteCodexHomeViaShell(sshConnOf(owner));
+}
+const sshConnOf=owner=>{const conn=owner?.conn||sessions.live().find(r=>r.conn)?.conn;if(!conn)throw Error('目前主機的 SSH 連線不可用。');return conn;};
+async function handover(owner,id){
+ const entry=known[id],from=entry.profile,to=owner.snapshot.profileId;
+ if(entry.summary?.threadSource==='subagent')throw Error('子代理對話無法單獨接續到其他主機。');
+ if(entry.summary?.ephemeral===true)throw Error('暫存對話無法接續到其他主機。');
+ audit('handover-start',{threadId:id,from,to});
+ let data,basename,source;
+ const mirror=rollouts.get(id,from);
+ if(mirror){data=mirror.data;basename=mirror.meta.basename;source='mirror';}
+ else{
+  const cached=remoteThreadCache.get(id,from);
+  if(!cached?.thread?.turns?.length||cached.openCodexHistoryComplete!==true)throw Error('這台 Mac 沒有此對話的完整紀錄，無法在目前主機接續；請先連回原主機一次。');
+  data=nativeRollouts.synthesize(cached.thread);basename=nativeRollouts.basenameFor(cached.thread);source='synthesized';
+ }
+ const codexHome=await remoteCodexHome(owner,to);
+ const remotePath=nativeRollouts.sessionsPath(codexHome,basename);
+ await nativeRollouts.upload(sshConnOf(owner),remotePath,data);
+ entry.profile=to;entry.handover={from,path:remotePath,source,bytes:data.length};
+ fs.writeFileSync(knownFile,JSON.stringify(known),{mode:0o600});
+ audit('handover-uploaded',{threadId:id,from,to,source,bytes:data.length});
+}
 async function refreshHistory(owner,threadId){
  const profile=owner.snapshot.profileId;
  if(owner.closed||known[threadId]?.profile!==profile||known[threadId]?.deleted)return;
@@ -396,6 +434,21 @@ function runtimeEvent(event,payload){
   grants:approvalGrants,getScope:()=>approvalScope(owner,payload.approvalId),onChange:publish,onError:error=>{bridgeError='工具權限未保存或操作未允許：'+error.message;publish();},
   show:async options=>{if(!parent||parent.isDestroyed())return {response:0};audit('tool-approval-shown',{scoped:options.buttons.length===3});const result=await dialog.showMessageBox(parent,options);audit('tool-approval-choice',{response:result.response});return result;},
   respond:decision=>{audit('tool-approval-result',{decision});return handlers.get('runtime:respond')({},{runtimeId:owner.id,approvalId:payload.approvalId,decision});}});
+}
+const WAIT_FOR_SSH=new Set(['turn/start','turn/steer','thread/start','thread/resume','thread/fork','review/start']);
+// Resolves true once the main SSH runtime is connected, false as soon as no connection attempt is
+// pending any more (or the host key still needs the user's confirmation).
+async function awaitConnection(ms=60000){
+ const pending=()=>connecting||!!mainReconnect.pending||!!mainReconnect.running;
+ if(!pending()||hostConfirmation)return false;
+ audit('request-waits-for-ssh',{});
+ const end=Date.now()+ms;
+ while(Date.now()<end&&!shuttingDown){
+  if(runtime&&!runtime.closed&&!connecting)return true;
+  if(!pending()||hostConfirmation)break;
+  await new Promise(resolve=>setTimeout(resolve,200));
+ }
+ return !!(runtime&&!runtime.closed&&!connecting);
 }
 async function request(ws,method,params,fromQueue=false){
  if(method==='thread/resume'&&params?.threadId&&!fromQueue&&clients.has(ws))lastViewed={id:params.threadId};
@@ -497,6 +550,9 @@ async function request(ws,method,params,fromQueue=false){
    if(method==='thread/read'||method==='thread/resume')return organization.projectResult(cachedProfile,nativePolicy.localSnapshot(cached,nativePolicy.resolveSelection({},known[params.threadId],settings),known[params.threadId]?.localCwd,known[params.threadId]?.permissionSnapshot));
   }
   if(/^thread\/.+\/list$/.test(method)&&params?.threadId)return {data:[],nextCursor:null};
+  // A message or a new conversation sent while SSH is still connecting (or auto-reconnecting)
+  // waits for that connection instead of failing with "not connected".
+  if(WAIT_FOR_SSH.has(method)&&await awaitConnection())return request(ws,method,params,fromQueue);
   if(routing.threadScoped(method,params)||method.startsWith('thread/')||method.startsWith('turn/'))throw Error(bridgeError||'SSH 尚未連線；請開啟側邊欄 SSH 連線。');
  }
  // The native UI asks for MCP status while opening a conversation, before thread/resume has
@@ -547,6 +603,8 @@ async function request(ws,method,params,fromQueue=false){
     return {data:[],nextCursor:null};
    }
   }
+  // Sending into another host's conversation continues it here: its rollout moves to this host first.
+  if(HANDOVER.has(method)&&params?.threadId&&known[params.threadId]?.profile&&known[params.threadId].profile!==runtime.snapshot.profileId&&!known[params.threadId]?.deleted)await handover(runtime,params.threadId);
   const threadProfile=known[params?.threadId]?.profile;
   if(threadProfile&&threadProfile!==runtime.snapshot.profileId&&!known[params?.threadId]?.deleted&&remoteThreadCache.has(params.threadId,threadProfile)){
    const cached=remoteThreadCache.get(params.threadId,threadProfile);
@@ -631,7 +689,7 @@ async function request(ws,method,params,fromQueue=false){
   if(['turn/start','review/start','thread/settings/update'].includes(method)&&!runtime.openCodexThreads?.has(params.threadId)){
    // Mode/project changes invalidate admissions; apply the current config before
    // the next model turn instead of reusing a thread with stale permissions.
-   await resumeThread({threadId:params.threadId,excludeTurns:true});
+   await resumeThread({threadId:params.threadId,excludeTurns:true,...(known[params.threadId]?.handover?{path:known[params.threadId].handover.path}:{})});
    lease?.check();
   }
   if(method==='thread/shellCommand'){
@@ -654,6 +712,7 @@ async function request(ws,method,params,fromQueue=false){
    }finally{clearInterval(monitor);}
   }
   const remoteParams=await organization.prepareThread(profileId,method,params||{});
+  if(method==='thread/resume'&&known[params?.threadId]?.handover&&!remoteParams.path)remoteParams.path=known[params.threadId].handover.path;
   lease?.check();
   const wireMethod=organization.remoteMethod(method,params||{});
   const knownEmpty=known[params.threadId]?.emptyHistory===true;
@@ -671,6 +730,14 @@ async function request(ws,method,params,fromQueue=false){
   if(explicitPermission&&settings.permissionMode!==selection.requested){settings.permissionMode=selection.requested;save();}
   if(explicitReviewer&&settings.approvalsReviewer!==selection.reviewer){settings.approvalsReviewer=selection.reviewer;save();}
   if(result.thread?.id){if(['thread/start','thread/fork'].includes(method)&&!fromQueue)lastViewed={id:result.thread.id};result.thread=organization.captureThread(profileId,method,params,workspace.localThread(result.thread,known,selectedCwd));if(['thread/read','thread/resume'].includes(method)||(method==='thread/fork'&&!params.excludeTurns))result.thread=nativeShell.merge(result.thread);const {turns,...summary}=result.thread;known[result.thread.id]={...known[result.thread.id],emptyHistory:method==='thread/start'?true:turns?.length?false:known[result.thread.id]?.emptyHistory,profile:requestOwner.snapshot.profileId,localCwd:selectedCwd||known[result.thread.id]?.localCwd,permissionMode:selectedCwd?selection.requested:known[result.thread.id]?.permissionMode,approvalsReviewer:selectedCwd?selection.reviewer:known[result.thread.id]?.approvalsReviewer,permissionSnapshot:verifiedPermission||known[result.thread.id]?.permissionSnapshot,environmentId:requestOwner.executor?.environmentId,summary};remoteThreadCache.set(result.thread.id,result,requestOwner.snapshot.profileId,require('./native-history.cjs').snapshotOptions(method,params));fs.writeFileSync(knownFile,JSON.stringify(known),{mode:0o600});}
+  // A turn or review that started, or a resume that answered, loaded the handed-over rollout.
+  const handedOver=result.thread?.id||params?.threadId;
+  if(handedOver&&known[handedOver]?.handover&&['thread/resume','turn/start','review/start'].includes(method)){
+   const h=known[handedOver].handover;delete known[handedOver].handover;
+   fs.writeFileSync(knownFile,JSON.stringify(known),{mode:0o600});
+   audit('handover-done',{threadId:handedOver,from:h.from,to:requestOwner.snapshot.profileId,source:h.source,bytes:h.bytes});
+   void refreshHistory(requestOwner,handedOver);
+  }
   const entry=known[params?.threadId];
   if(entry){
    if(selectedCwd){entry.localCwd=selectedCwd;if(entry.summary)entry.summary.cwd=selectedCwd;}if(selectedCwd||explicitPermission)entry.permissionMode=selection.requested;
@@ -685,6 +752,12 @@ async function request(ws,method,params,fromQueue=false){
   if(method==='thread/revert'||(['thread/resume','thread/fork'].includes(method)&&params.excludeTurns))void refreshHistory(requestOwner,result.thread.id);
   audit('rpc',{method,success:true});return result;
   }catch(error){
+   const h=known[params?.threadId]?.handover;
+   if(h&&['thread/resume','turn/start','review/start'].includes(method)){
+    known[params.threadId].profile=h.from;delete known[params.threadId].handover;
+    fs.writeFileSync(knownFile,JSON.stringify(known),{mode:0o600});
+    audit('handover-reverted',{threadId:params.threadId,from:h.from,message:String(error.message).slice(0,300)});
+   }
    if(pendingPermission&&!backendAccepted&&!requestOwner.closed){
     try{if(requestOwner.permissionMode!==previousPermission)await handlers.get('runtime:permission')({},requestOwner.id,previousPermission);guardianRuntime.select(requestOwner,previousReviewer);publish();}
     catch(restore){audit('permission-restore-error',{message:restore.message});}
@@ -705,7 +778,26 @@ ipcMain.on('opencodex:initial-state',event=>{event.returnValue=publicState();});
 // --- Conversation history: keep the offline cache warm and export Markdown ---
 // Every conversation of the connected host is read once (and again after each turn) into
 // native-history, so it stays readable with no SSH connection and is never locked in the App.
-const historySync={pending:new Map(),failures:new Map(),running:false,touch(id,turnId){this.pending.set(id,turnId||null);setTimeout(()=>void syncHistory(),1500);}};
+const historySync={pending:new Map(),failures:new Map(),mirrorFailures:new Map(),running:false,touch(id,turnId){this.pending.set(id,turnId||null);setTimeout(()=>void syncHistory(),1500);}};
+// The rollout mirror is behind when there is none, the host moved the file, or the conversation
+// has a newer turn than the mirror. Sub-agent threads cannot continue alone, so they are skipped.
+function needsMirror(id){
+ const e=known[id];if(!e||e.deleted||!e.profile||e.summary?.ephemeral===true||e.emptyHistory===true||e.summary?.threadSource==='subagent')return false;
+ if((historySync.mirrorFailures.get(id)||0)>=3)return false;
+ const cached=remoteThreadCache.get(id,e.profile),remotePath=cached?.thread?.path;
+ if(typeof remotePath!=='string'||!remotePath.startsWith('/'))return false;
+ const m=rollouts.meta(id,e.profile);
+ return !m||m.remotePath.replace(/\.zst$/,'')!==remotePath||Number(cached.thread.updatedAt||0)>Number(m.updatedAt||0);
+}
+async function mirrorRollout(owner,id){
+ const profile=owner.snapshot.profileId,cached=remoteThreadCache.get(id,profile),remotePath=cached?.thread?.path;
+ if(typeof remotePath!=='string'||owner.closed||known[id]?.profile!==profile)return;
+ try{
+  const got=await nativeRollouts.download(sshConnOf(owner),remotePath);
+  rollouts.set(id,profile,got.data,{remotePath:got.remotePath,updatedAt:cached.thread.updatedAt,compressed:got.compressed});
+  historySync.mirrorFailures.delete(id);audit('rollout-mirrored',{threadId:id,bytes:got.data.length,compressed:got.compressed});
+ }catch(error){historySync.mirrorFailures.set(id,(historySync.mirrorFailures.get(id)||0)+1);audit('rollout-mirror-failed',{threadId:id,message:String(error.message).slice(0,300)});}
+}
 function needsRefresh(id){
  const e=known[id];if(!e||e.deleted||!e.profile||e.summary?.ephemeral===true||e.emptyHistory===true)return false;
  const cached=remoteThreadCache.get(id,e.profile);
@@ -721,16 +813,20 @@ async function syncHistory(limit=8){
  for(const id of new Set([...historySync.pending.keys(),...Object.keys(known)])){
   if(known[id]?.profile!==profile||known[id].deleted||(historySync.failures.get(id)||0)>=3){historySync.pending.delete(id);continue;}
   if(threadBusy(id))continue;
-  if(stale(id)||needsRefresh(id))ids.push(id);else historySync.pending.delete(id);
+  if(stale(id)||needsRefresh(id)||needsMirror(id))ids.push(id);else historySync.pending.delete(id);
  }
  if(!ids.length)return;
  historySync.running=true;
  try{
   for(const id of ids.slice(0,limit)){
+   const refresh=stale(id)||needsRefresh(id);
    historySync.pending.delete(id);
    const ws=[...clients][0];if(!ws||!runtime||runtime.closed)break;
-   try{await request(ws,'thread/read',{threadId:id,includeTurns:true},true);historySync.failures.delete(id);audit('history-synced',{threadId:id});}
-   catch(error){historySync.failures.set(id,(historySync.failures.get(id)||0)+1);audit('history-sync-failed',{threadId:id,message:error.message});}
+   if(refresh){
+    try{await request(ws,'thread/read',{threadId:id,includeTurns:true},true);historySync.failures.delete(id);audit('history-synced',{threadId:id});}
+    catch(error){historySync.failures.set(id,(historySync.failures.get(id)||0)+1);audit('history-sync-failed',{threadId:id,message:error.message});continue;}
+   }
+   if(needsMirror(id)&&!threadBusy(id))await mirrorRollout(runtime,id);
   }
  }finally{historySync.running=false;}
  if(ids.length>limit)setTimeout(()=>void syncHistory(limit),500);
@@ -854,6 +950,12 @@ async function start(){
     if(!peer||peer.closed){send(ws,{id:m.id,error:{code:-32000,message:'沒有已連線的協作 Agent。'}});return;}
     const dropped=peer;if(dropped.conn)dropped.conn.end();else await handlers.get(dropped.cli?'claude:disconnect':'runtime:disconnect')({},dropped.cli?.id||dropped.id);
     audit('test-drop-peer',{agent:dropped.cli?'claude':'codex'});send(ws,{id:m.id,result:{}});return;
+   }
+   // Development acceptance only: switch the main host, as the sidebar's 連線 button does.
+   if(m.method==='opencodex/test/connect'&&process.argv.includes('--opencodex-test')){
+    try{await connectBridge({profileId:m.params?.profileId});send(ws,{id:m.id,result:publicState()});}
+    catch(e){send(ws,{id:m.id,error:{code:-32000,message:e.message}});}
+    return;
    }
    try{send(ws,{id:m.id,result:await request(ws,m.method,m.params)});}
    catch(e){audit('rpc-error',{method:m.method,threadId:typeof m.params?.threadId==='string'?m.params.threadId:undefined,message:String(e.message).slice(0,500)});send(ws,{id:m.id,error:{code:e.code||-32000,message:e.message||'OpenCodex adapter error'}});}
