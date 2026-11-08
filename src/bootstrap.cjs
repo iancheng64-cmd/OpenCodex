@@ -8,6 +8,7 @@ const openCodexVersion=require('../package.json').openCodexVersion;
 const root=path.join(app.getPath('appData'),'OpenCodex');
 fs.mkdirSync(root,{recursive:true,mode:0o700});
 const {ApprovalGrants,approvalScope,appScope}=require('./native-approvals.cjs');
+const {activatesGoal,continueInterruptedGoal}=require('./native-goal-guard.cjs');
 const approvalGrants=new ApprovalGrants(path.join(root,'tool-approvals.json'));
 app.setName('OpenCodex');
 for(const key of ['CODEX_ELECTRON_DEV_PARENT_PID','CODEX_ELECTRON_DEV_WEBVIEW_PID','CODEX_ELECTRON_DEV_RELAUNCH_MARKER_PATH'])delete process.env[key];
@@ -43,6 +44,11 @@ let bridge,backend,runtime,claude,handoff,external,agents,peer,bridgeError,local
 let shuttingDown=false;// module-wide: reconnect and close handlers outside start() also read it
 let connecting=false,connectingPeer=false,hostConfirmation=null,pendingConnection=null,permissionChanging=false,connectionIntent=0;
 const {validateProfile,validateCwd}=require('./ssh-profiles.cjs');
+// Parallel conversations: extra runtimes to the same host; see native-sessions.cjs.
+const sessions=new (require('./native-sessions.cjs').SessionPool)({primary:()=>runtime,limit:()=>Math.max(0,Math.min(16,Number(settings.maxParallelSessions)||4)-1),spawn:()=>openWorker(),release:(owner,id)=>releaseThread(owner,id),audit:(type,data)=>audit(type,data)});
+const anyRun=()=>sessions.live().some(r=>r.run||r.openCodexPreparing);
+const threadBusy=id=>sessions.live().some(r=>r.run?.threadId===id||r.openCodexPreparing?.threadId===id)||!!handoff?.running(id)||nativeShell.active?.remoteThreadId===id;
+const handoffBusyFor=id=>{if(!handoff||isClaude())return false;const model=handoff.snapshot(id).model,h=handoff.isModel(model)?handoff.owner(model):null;return !!h?.busy;};
 // A collaborator that drops unexpectedly reconnects in the background with bounded backoff.
 const peerReconnect=new (require('./native-peer-reconnect.cjs').PeerReconnect)({
  state:()=>({current:peer,profileId:settings.peerProfileId||settings.profileId,mainConnected:isClaude()?!!claude?.connected:!!runtime&&!runtime.closed,confirmation:!!hostConfirmation,
@@ -51,13 +57,20 @@ const peerReconnect=new (require('./native-peer-reconnect.cjs').PeerReconnect)({
  audit:(type,data)=>audit(type,data),onGiveUp:()=>{bridgeError='協作 Agent 已斷線，自動重連失敗；請在「SSH 連線」手動連接。';publish();}
 });
 // Work that a reconnect must never interrupt; a closed GPT link has no live work.
-const work=()=>!!(connecting||permissionChanging||agents?.active||claude?.busy||handoff?.busy||claude?.queue.starting||(runtime&&!runtime.closed&&(runtime.run||runtime.openCodexPreparing))||localTurns.size||nativeShell.active||nativeQueue.starting);
+const work=()=>!!(connecting||permissionChanging||agents?.active||claude?.busy||handoff?.busy||claude?.queue.starting||anyRun()||localTurns.size||nativeShell.active||nativeQueue.starting);
 // The main GPT Codex link reconnects after an unexpected drop, then restores the collaborator.
 const mainReconnect=new (require('./native-peer-reconnect.cjs').PeerReconnect)({
  state:()=>({current:runtime,profileId:settings.profileId,mainConnected:true,confirmation:!!hostConfirmation,busy:work()}),
- connect:async()=>{const previous=bridgeError;try{await connectBridge({reconnect:true});}catch(error){bridgeError=previous;publish();throw error;}void restorePeer();},
+ connect:async()=>{const previous=bridgeError;try{await connectBridge({reconnect:true});}catch(error){bridgeError=previous;publish();throw error;}void restorePeer();void resumeInterruptedGoal();},
  audit:(type,data)=>audit(type.replace('ssh-peer-','ssh-main-'),data),onGiveUp:()=>{bridgeError='SSH 已斷線，自動重連失敗；請在「SSH 連線」手動連線。';publish();}
 });
+let interruptedThread=null;
+async function resumeInterruptedGoal(){
+ const threadId=interruptedThread,owner=runtime,ws=[...clients][0];interruptedThread=null;
+ if(!threadId||!owner||owner.closed||!ws)return;
+ try{if(await continueInterruptedGoal({rpc:owner.rpc,threadId,start:params=>request(ws,'turn/start',params)}))audit('goal-continued-after-reconnect',{threadId});}
+ catch(error){audit('goal-continue-failed',{threadId,message:error.message});}
+}
 // A sidebar Claude choice made while the collaborator is offline applies once it connects.
 let pendingDefault=null;
 // Waits for startup work after a reconnect without consuming attempts; three failures or five minutes end it.
@@ -67,7 +80,7 @@ function restorePeer(){return restoring||=(async()=>{
  const deadline=Date.now()+300000;let attempt=0;
  try{
   while(!shuttingDown&&Date.now()<deadline){
-   if(isClaude()||handoff?.connected||!(settings.peerProfileId||settings.profileId)||!runtime||runtime.closed)return;
+   if(noPeers||isClaude()||handoff?.connected||!(settings.peerProfileId||settings.profileId)||!runtime||runtime.closed)return;
    if(!connecting&&!permissionChanging&&!agents?.active&&!handoff?.primary?.busy){
     attempt++;
     try{await connectBridge({peer:true,profileId:settings.peerProfileId||settings.profileId,reconnect:true});audit('ssh-peer-restored',{attempt,connected:!!handoff?.connected});return;}
@@ -79,11 +92,20 @@ function restorePeer(){return restoring||=(async()=>{
  }finally{restoring=null;}
 })();}
 const clients=new Set(),pendingServer=new Map(),knownFile=path.join(root,'native-threads.json');
-let known={};try{known=JSON.parse(fs.readFileSync(knownFile,'utf8'));}catch{}
+let known={};try{known=JSON.parse(fs.readFileSync(knownFile,'utf8'));for(const entry of Object.values(known)){if(entry?.summary?.status?.type==='active'){entry.summary.status={type:'idle'};}}}catch{}
+// One-time move to the ChatGPT app default: follow-ups queue unless the user chooses to steer.
+try{const marker=path.join(root,'.follow-up-queue-v1'),cfg=path.join(root,'codex-official/config.toml');if(!fs.existsSync(marker)){if(fs.existsSync(cfg)){const text=fs.readFileSync(cfg,'utf8'),next=text.replace(/^followUpQueueMode\s*=\s*"steer"/m,'followUpQueueMode = "queue"');if(next!==text)fs.writeFileSync(cfg,next);}fs.writeFileSync(marker,'1',{mode:0o600});}}catch{/* A missing or locked config keeps the existing mode. */}
 const auditFile=path.join(root,'adapter-events.jsonl');
 function audit(type,data={}){fs.appendFileSync(auditFile,JSON.stringify({at:new Date().toISOString(),type,...data})+'\n',{mode:0o600});}
+// macOS kills a bundled engine whose signature no longer holds, and the native startup then
+// reports it as unreachable organization settings. Name the real cause instead.
+cp.execFile(path.join(process.resourcesPath,'codex-cli/CodexCLI.app/Contents/MacOS/codex'),['--version'],{timeout:30000},error=>{
+ if(error?.signal!=='SIGKILL'||error.killed)return;
+ audit('engine-blocked',{});
+ void app.whenReady().then(()=>{dialog.showErrorBox('OpenCodex 內附的 Codex 引擎被 macOS 阻擋','App 內的檔案被修改過，簽章已失效，所以 macOS 拒絕執行內附引擎。這不是網路或組織設定問題。請重新安裝 OpenCodex。');app.exit(1);});
+});
 const {connectionState}=require('./native-connection.cjs');
-function publicState(){const grants=approvalGrants.list();return {composio:bridge?.composio.state()||null,quotas:providerQuotas(),peerBusy:!!(handoff?.primary?.busy||agents?.active),agents:agents?.state()||null,handoff:!isClaude()&&handoff?{connected:handoff.connected,defaultEngine:pendingDefault||handoff.defaultEngine,configured:!!(settings.peerProfileId||settings.profileId),pending:!!pendingDefault}:null,fullAccess:settings.fullAccess===true,permissionBusy:!!agents?.active||!!handoff?.busy||permissionChanging||!!runtime?.run||!!runtime?.openCodexPreparing||localTurns.size>0||!!nativeShell.active||!!nativeQueue.starting,approvalGrants:grants,codexConnections:settings.codexConnections||{},claudeConnections:settings.claudeConnections||{},approvalError:approvalGrants.error,mode:settings.mode,sshAgent:settings.sshAgent,profile:runtime?.snapshot?.hostName||settings.profileName,transport:runtime?.snapshot?.transport||null,cwd:runtime?.localCwd||settings.cwd,...connectionState(runtime),error:bridgeError||null,version:openCodexVersion,quota:quotaMonitor.snapshot(),connecting,peerConnecting:connecting&&connectingPeer,hostConfirmation,profileId:runtime?.snapshot?.profileId||settings.profileId||null,permissionMode:runtime?.permissionMode||settings.permissionMode,guardianAvailable:guardianRuntime.capable(runtime),runtimeVersion:runtime?.snapshot?.runtimeVersion||null,engine:'opencodex-direct-ssh',agentBridgeAppLoaded:Object.keys(require.cache).some(k=>k===path.join(abRoot,'dist-main/main.js')),...(isClaude()&&claude?{...claude.state(),permissionBusy:!!agents?.active||permissionChanging||claude.busy||claude.queue.starting}: {})};}
+function publicState(){const grants=approvalGrants.list();return {composio:bridge?.composio.state()||null,quotas:providerQuotas(),peerBusy:!!(handoff?.primary?.busy||agents?.active),agents:agents?.state()||null,handoff:!isClaude()&&handoff?{connected:handoff.connected,defaultEngine:pendingDefault||handoff.defaultEngine,configured:!!(settings.peerProfileId||settings.profileId),pending:!!pendingDefault}:null,fullAccess:settings.fullAccess===true,permissionBusy:!!agents?.active||!!handoff?.busy||permissionChanging||anyRun()||localTurns.size>0||!!nativeShell.active||!!nativeQueue.starting,parallelSessions:sessions.state(),approvalGrants:grants,codexConnections:settings.codexConnections||{},claudeConnections:settings.claudeConnections||{},approvalError:approvalGrants.error,mode:settings.mode,sshAgent:settings.sshAgent,profile:runtime?.snapshot?.hostName||settings.profileName,transport:runtime?.snapshot?.transport||null,cwd:runtime?.localCwd||settings.cwd,...connectionState(runtime),error:bridgeError||null,version:openCodexVersion,quota:quotaMonitor.snapshot(),connecting,peerConnecting:connecting&&connectingPeer,hostConfirmation,profileId:runtime?.snapshot?.profileId||settings.profileId||null,permissionMode:runtime?.permissionMode||settings.permissionMode,guardianAvailable:guardianRuntime.capable(runtime),runtimeVersion:runtime?.snapshot?.runtimeVersion||null,engine:'opencodex-direct-ssh',agentBridgeAppLoaded:Object.keys(require.cache).some(k=>k===path.join(abRoot,'dist-main/main.js')),...(isClaude()&&claude?{...claude.state(),permissionBusy:!!agents?.active||permissionChanging||claude.busy||claude.queue.starting}: {})};}
 const {rateLimitSummary}=require(path.join(abRoot,'dist-main/runtime-usage.js'));
 const quotaMonitor=require('./quota.cjs')({normalize:rateLimitSummary,publish,getSource:()=>isRemote()?(runtime&&!runtime.closed?{key:runtime.id,rpc:runtime.rpc,label:(runtime.snapshot.transport==='https-relay'?'HTTPS/WSS Runtime · ':'SSH Runtime · ')+runtime.snapshot.hostName}:null):(localRpc&&!localRpc.isClosed?{key:settings.mode,rpc:localRpc,label:settings.mode==='official'?'本機官方登入':'自訂 API'}:null)});
 function providerQuotas(){
@@ -98,10 +120,12 @@ function refreshQuotas(){return refreshingQuotas||=(async()=>{
  try{const before=JSON.stringify(handoff?.models());await Promise.allSettled([quotaMonitor.refresh(),handoff?.claude.quota(),external?.refresh()]);if(before!==JSON.stringify(handoff?.models()))modelsChanged();applyPendingDefault();}
  finally{refreshingQuotas=null;publish();}
 })();}
+// An isolated QA instance must not probe the real accounts on its loopback host.
+const noPeers=process.argv.includes('--opencodex-test')&&process.env.OPENCODEX_TEST_NO_PEERS==='1';
 function connectProviders(){return connectingProviders||=(async()=>{
  await null;const owner=runtime;let changed=false;
  try{
-  if(!external||!owner||owner.closed||!isRemote()||shuttingDown)return;
+  if(noPeers||!external||!owner||owner.closed||!isRemote()||shuttingDown)return;
   await Promise.allSettled(['grok','antigravity'].map(async id=>{
    const r=await external.connect(id,owner);
    if(runtime!==owner||owner.closed||shuttingDown)return;
@@ -135,7 +159,7 @@ const nativeConfigMutations=new(require('./native-config-mutations.cjs').NativeC
  request:(method,params,timeout)=>localRpc.request(method,params,timeout),
  invalidate:()=>bridge?.invalidateNativeTools(),
  cwd:()=>runtime?.localCwd||settings.cwd,
- busy:()=>agents?.active||claude?.busy||handoff?.busy||claude?.queue.starting||runtime?.run||runtime?.openCodexPreparing||nativeShell.active||nativeQueue.starting
+ busy:()=>agents?.active||claude?.busy||handoff?.busy||claude?.queue.starting||anyRun()||nativeShell.active||nativeQueue.starting
 });
 async function localRequest(method,params,timeout=60000){return nativeConfigMutations.call(method,params,timeout);}
 function publish(){for(const w of BrowserWindow.getAllWindows())w.webContents.send('opencodex:status',publicState());}
@@ -152,8 +176,8 @@ function local(){
  return localRpc;
 }
 let localReady;const localTurns=new Set();
-const nativeShell=new (require('./native-shell.cjs').NativeShell)({file:path.join(root,'native-shell-history.json'),ready:readyLocal,getRpc:()=>localRpc,emit:message=>{for(const ws of clients)send(ws,message);if(message.method==='turn/completed'){if(runtime)void refreshHistory(runtime,message.params.threadId);nativeQueue.completed(runtime?.snapshot?.profileId,message.params.threadId,message.params.turn.status);}},onError:error=>audit('native-shell-error',{message:error.message})});
-const nativeQueue=new (require('./native-queue.cjs').NativeQueue)({file:path.join(root,'native-queue.json'),context:()=>({profile:runtime?.snapshot?.profileId,connected:isRemote()&&!!runtime&&!runtime.closed&&clients.size>0,busy:!!runtime?.run||!!runtime?.openCodexPreparing||!!handoff?.busy||!!nativeShell.active,ready:id=>runtime?.openCodexThreads?.has(id)&&known[id]?.profile===runtime?.snapshot?.profileId}),selection:threadId=>handoff?.snapshot(threadId)||{},start:(threadId,input,selection)=>request([...clients][0],'turn/start',{threadId,input,...selection},true),emit:message=>{for(const ws of clients)send(ws,message);},onError:error=>{bridgeError='排隊訊息未確認送出：'+error.message;audit('native-queue-error',{message:error.message});publish();}});
+const nativeShell=new (require('./native-shell.cjs').NativeShell)({file:path.join(root,'native-shell-history.json'),ready:readyLocal,getRpc:()=>localRpc,emit:message=>{for(const ws of clients)send(ws,message);if(message.method==='turn/completed'){const owner=sessions.ownerOf(message.params.threadId)||runtime;if(owner&&!owner.closed)void refreshHistory(owner,message.params.threadId);nativeQueue.completed(runtime?.snapshot?.profileId,message.params.threadId,message.params.turn.status);}},onError:error=>audit('native-shell-error',{message:error.message})});
+const nativeQueue=new (require('./native-queue.cjs').NativeQueue)({file:path.join(root,'native-queue.json'),context:()=>({profile:runtime?.snapshot?.profileId,connected:isRemote()&&!!runtime&&!runtime.closed&&clients.size>0,busy:id=>threadBusy(id)||handoffBusyFor(id)||!sessions.canStart(id),ready:id=>!!runtime&&!runtime.closed&&known[id]?.profile===runtime.snapshot?.profileId&&!known[id]?.deleted}),selection:threadId=>handoff?.snapshot(threadId)||{},start:(threadId,input,selection,clientUserMessageId)=>request([...clients][0],'turn/start',{threadId,input,clientUserMessageId,...selection},true),emit:message=>{for(const ws of clients)send(ws,message);},onError:error=>{bridgeError='排隊訊息未確認送出：'+error.message;audit('native-queue-error',{message:error.message});publish();}});
 function readyLocal(){if(localRpc?.isClosed)localReady=null;if(!localReady){const rpc=local();localReady=rpc.request('initialize',{clientInfo:{name:'opencodex',title:'OpenCodex',version:openCodexVersion},capabilities:{experimentalApi:true}}).then(r=>{rpc.notify('initialized');if(!isRemote())quotaMonitor.refresh();return r;}).catch(e=>{localReady=null;throw e;});}return localReady;}
 async function connectBridge(input={}){
  if(!isRemote())throw Error('請先切換至 SSH 模式。');
@@ -161,7 +185,7 @@ async function connectBridge(input={}){
  const asPeer=input.confirmationId?pendingConnection?.asPeer===true:input.peer===true;
  const sameHost=!asPeer&&!input.confirmationId&&runtime&&!runtime.closed&&(!input.profileId||input.profileId===runtime.snapshot.profileId)&&(!input.cwd||input.cwd===runtime.localCwd);
  if(sameHost){void connectProviders();void restorePeer();void refreshQuotas();return publicState();}
- const busy=asPeer?agents?.active||handoff?.primary?.busy:agents?.active||claude?.busy||handoff?.busy||claude?.queue.starting||runtime&&!runtime.closed&&(runtime.run||runtime.openCodexPreparing)||localTurns.size||nativeShell.active||nativeQueue.starting;
+ const busy=asPeer?agents?.active||handoff?.primary?.busy:agents?.active||claude?.busy||handoff?.busy||claude?.queue.starting||anyRun()||localTurns.size||nativeShell.active||nativeQueue.starting;
  if(busy)throw Error('模型可直接在對話選單切換；更換工作主機請等目前回合結束。');
  if(asPeer&&!(isClaude()?claude.connected:runtime&&!runtime.closed))throw Error('請先連接主要 Agent，再連接協作 Agent。');
  const targetClaude=asPeer?!isClaude():isClaude();
@@ -196,13 +220,13 @@ async function connectBridge(input={}){
   const next=targetClaude?bridge.claudeBackend.openCodexClaudeRuntimes.get(result.runtimeId):backend.openCodexRuntimes.get(result.runtimeId);
   if(asPeer){const old=peer;peer=next;if(targetClaude){peer.localCwd=peer.cwd;peer.toolHost=peer.host;if(!isClaude()){handoff.detach(old);handoff.attach(next,result);applyPendingDefault();}}else{const codexPeer=peer;peer.rpc.on('closed',()=>{publish();if(peer===codexPeer){audit('ssh-peer-closed',{agent:'codex'});peerReconnect.schedule(codexPeer);}});}settings.peerProfileId=profile.id;}
   // A new main host moves the collaborator too: restorePeer falls back to profileId.
-  else {await external?.closeAll();await disconnectPeer();if(isClaude())claude.attach(next,result);else attach(next);settings.profileId=profile.id;settings.profileName=profile.name;settings.cwd=localCwd;delete settings.peerProfileId;}
+  else {await external?.closeAll();await disconnectPeer();await closeWorkers();if(isClaude())claude.attach(next,result);else {attach(next);lastConnectionParams=params;}settings.profileId=profile.id;settings.profileName=profile.name;settings.cwd=localCwd;delete settings.peerProfileId;}
   if(targetClaude)settings.claudeConnections={...settings.claudeConnections,[profile.id]:claudeConnection(params)};
   save();
   if(previous&&previous!==next&&!previous.closed)await handlers.get(targetClaude?'claude:disconnect':'runtime:disconnect')({},targetClaude?previous.cli.id:previous.id);
   notifyRemoteState();
   return publicState();
- }catch(e){bridgeError=e.message;throw e;}finally{connecting=false;connectingPeer=false;publish();if(!asPeer&&runtime&&!runtime.closed){void connectProviders();void restorePeer();}}
+ }catch(e){bridgeError=e.message;throw e;}finally{connecting=false;connectingPeer=false;publish();if(!asPeer&&runtime&&!runtime.closed){void connectProviders();void restorePeer();void maintainSessions();}}
 }
 async function disconnectPeer(){
  const previous=peer;peer=null;peerReconnect.cancel();handoff?.detach(previous);
@@ -219,35 +243,103 @@ function permissionSnapshot(owner,selection,cwd,threadId,historical=false){
  // always reopens the thread through the current sandbox and config checks.
  return known[threadId]?.permissionSnapshot;
 }
-function attach(value){
- if(!value||value===runtime)return;
- if(runtime?.run)throw Error('請先停止目前工作再切換 Runtime。');
- runtime=value;bridgeError=null;const attached=runtime;quotaMonitor.reset();
- runtime.openCodexServerRequest=(request,run)=>{
+function attach(value,{worker=false}={}){
+ if(!value||value===runtime||sessions.workers.has(value))return;
+ if(!worker&&runtime?.run)throw Error('請先停止目前工作再切換 Runtime。');
+ const attached=value;
+ if(!worker){runtime=value;bridgeError=null;quotaMonitor.reset();}
+ // A worker stays current while the pool lists it; the primary while it is the main runtime.
+ const current=()=>worker?!attached.closed&&sessions.workers.has(attached):runtime===attached;
+ attached.openCodexLastActivity=Date.now();
+ attached.openCodexMultiSession=true;attached.runs??=new Map();attached.openCodexSubagentsByThread??=new Map();
+ attached.openCodexServerRequest=(request,run)=>{
   const ws=[...clients][0];if(!ws)return false;
   const id='remote:'+request.id;pendingServer.set(id,{rpc:attached.rpc,id:request.id,ws,run,owner:attached});
   send(ws,{...request,id});return true;
  };
- runtime.openCodexCloseRun=run=>{
+ attached.openCodexCloseRun=run=>{
   for(const [id,pending]of pendingServer)if(pending.owner===attached&&pending.run===run){
    pendingServer.delete(id);pending.rpc.reject(pending.id,'The turn has ended.');
    send(pending.ws,{method:'serverRequest/resolved',params:{requestId:id}});
   }
  };
- runtime.openCodexChildThread=(thread,parent)=>{
-  if(runtime!==attached||attached.closed)return;
+ attached.openCodexChildThread=(thread,parent)=>{
+  if(!current()||attached.closed)return;
   const previous=known[thread.id];if(previous&&previous.profile!==attached.snapshot.profileId)throw Error('Subagent history owner changed');
   const {turns,...summary}=workspace.localThread(thread,known,attached.localCwd);
   known[thread.id]={...previous,profile:attached.snapshot.profileId,localCwd:attached.localCwd,environmentId:attached.executor.environmentId,permissionMode:known[parent.threadId]?.permissionMode||settings.permissionMode,approvalsReviewer:known[parent.threadId]?.approvalsReviewer||attached.openCodexReviewer||'user',permissionSnapshot:known[parent.threadId]?.permissionSnapshot,emptyHistory:false,summary};
   remoteThreadCache.set(thread.id,{thread:{...summary,turns}},attached.snapshot.profileId,{complete:true});
   fs.writeFileSync(knownFile,JSON.stringify(known),{mode:0o600});
  };
- const notifyRemote=m=>{if(eventStreams.notification(attached,m))return;if(runtime!==attached||!isRemote())return;if(m.method==='turn/started'||m.method==='turn/completed')setImmediate(publish);if(m.method==='turn/started'&&known[m.params.threadId]){known[m.params.threadId].emptyHistory=false;fs.writeFileSync(knownFile,JSON.stringify(known),{mode:0o600});}if(!m.method.startsWith('account/')&&m.method!=='thread/queue/changed'){if(m.method==='thread/settings/updated'){const choice=pendingPermissions.get(attached)?.get(m.params?.threadId)||nativePolicy.resolveSelection({},known[m.params?.threadId],settings);m={...m,params:nativePolicy.localSnapshot(m.params,choice,known[m.params?.threadId]?.localCwd||attached.localCwd,permissionSnapshot(attached,choice,known[m.params?.threadId]?.localCwd||attached.localCwd,m.params?.threadId))};if(handoff&&!isClaude())m=handoff.settings(m);}const mapped=organization.projectNotification(attached.snapshot.profileId,m.params?.thread?{...m,params:{...m.params,thread:workspace.localThread(m.params.thread,known,m.method==='thread/started'?attached.localCwd:undefined)}}:m);for(const ws of clients)send(ws,mapped);}if(m.method==='turn/completed'){void refreshHistory(attached,m.params.threadId);nativeQueue.completed(attached.snapshot.profileId,m.params.threadId,m.params.turn.status);}if(m.method==='account/updated')quotaMonitor.invalidate();else if(m.method==='account/rateLimits/updated'||m.method==='turn/completed')quotaMonitor.refresh();};
- runtime.openCodexHooksNotification=notifyRemote;
- runtime.openCodexHooksError=error=>{if(runtime!==attached||attached.closed)return;bridgeError='Mac Hooks：'+error.message;audit('hooks-error',{message:error.message});publish();};
- runtime.rpc.on('notification',m=>{if(!attached.openCodexHooks?.suppress(m))notifyRemote(m);});
- runtime.rpc.on('closed',()=>{eventStreams.disconnect(attached);if(runtime!==attached)return;quotaMonitor.reset(null,'disconnected');bridgeError='連線已中斷；指令不會自動重送。';publish();notifyRemoteState();audit('ssh-closed',{agent:'codex'});if(!shuttingDown)mainReconnect.schedule(attached);});
- audit('ssh-connected',{executor:!!runtime.executor?.isRunning,version:runtime.snapshot.runtimeVersion});publish();quotaMonitor.refresh();
+ const notifyRemote=m=>{if(eventStreams.notification(attached,m))return;if(!current()||!isRemote())return;if(m.method==='thread/closed'&&sessions.migrating.get(m.params?.threadId)===attached){sessions.migrating.delete(m.params.threadId);return;}if(m.method==='turn/started'||m.method==='turn/completed')setImmediate(publish);if(m.method==='turn/started'&&known[m.params.threadId]){known[m.params.threadId].emptyHistory=false;fs.writeFileSync(knownFile,JSON.stringify(known),{mode:0o600});}if(!m.method.startsWith('account/')&&m.method!=='thread/queue/changed'){if(m.method==='thread/settings/updated'){const choice=pendingPermissions.get(attached)?.get(m.params?.threadId)||nativePolicy.resolveSelection({},known[m.params?.threadId],settings);m={...m,params:nativePolicy.localSnapshot(m.params,choice,known[m.params?.threadId]?.localCwd||attached.localCwd,permissionSnapshot(attached,choice,known[m.params?.threadId]?.localCwd||attached.localCwd,m.params?.threadId))};if(handoff&&!isClaude())m=handoff.settings(m);}const mapped=organization.projectNotification(attached.snapshot.profileId,m.params?.thread?{...m,params:{...m.params,thread:workspace.localThread(m.params.thread,known,m.method==='thread/started'?attached.localCwd:undefined)}}:m);for(const ws of clients)send(ws,mapped);}if(m.method==='turn/completed'){void refreshHistory(attached,m.params.threadId);nativeQueue.completed(attached.snapshot.profileId,m.params.threadId,m.params.turn.status);}if(m.method==='account/updated')quotaMonitor.invalidate();else if(m.method==='account/rateLimits/updated'||m.method==='turn/completed')quotaMonitor.refresh();};
+ attached.openCodexHooksNotification=notifyRemote;
+ attached.openCodexHooksError=error=>{if(!current()||attached.closed)return;bridgeError='Mac Hooks：'+error.message;audit('hooks-error',{message:error.message});publish();};
+ const serverTurn=backend.openCodexWatchServerTurns?.(attached,bridge.runtimeDependencies,{
+  // A turn's tools are bound to the workspace the tool host currently has open.
+  adoptable:id=>known[id]?.profile===attached.snapshot.profileId&&!known[id]?.deleted&&known[id]?.localCwd===attached.localCwd,
+  onAdopt:id=>{handoff?.activeChoices.set(id,handoff.snapshot(id));setImmediate(publish);},
+  notify:audit
+ });
+ let activeThread=null;
+ attached.rpc.on('notification',m=>{
+  if(m.method==='turn/started'||m.method==='turn/completed')attached.openCodexLastActivity=Date.now();
+  // The engine unloads an unsubscribed idle conversation; admit it again before its next turn.
+  if(m.method==='thread/closed'&&m.params?.threadId){const id=m.params.threadId;if(attached.openCodexThreads?.has(id))audit('thread-closed',{threadId:id,runtimeId:attached.id,released:sessions.migrating.get(id)===attached});attached.openCodexThreads?.delete(id);attached.openCodexDormantThreads?.delete(id);attached.openCodexAgentReceipts?.delete(id);const waiter=attached.openCodexClosedWaiters?.get(id);if(waiter){attached.openCodexClosedWaiters.delete(id);waiter('closed');}}
+  if(m.method==='turn/started'&&attached.openCodexThreads?.has(m.params?.threadId))activeThread=m.params.threadId;
+  if(m.method==='turn/completed'&&m.params?.threadId===activeThread)activeThread=null;
+  serverTurn?.(m);if(!attached.openCodexHooks?.suppress(m))notifyRemote(m);
+ });
+ attached.rpc.on('closed',()=>{eventStreams.disconnect(attached);if(worker){sessions.forget(attached);for(const [id,owner] of sessions.migrating)if(owner===attached)sessions.migrating.delete(id);publish();return;}if(runtime!==attached)return;interruptedThread=activeThread;quotaMonitor.reset(null,'disconnected');bridgeError='連線已中斷；指令不會自動重送。';publish();notifyRemoteState();audit('ssh-closed',{agent:'codex'});if(!shuttingDown)mainReconnect.schedule(attached);});
+ if(worker){audit('session-worker-connected',{runtimeId:attached.id,executor:!!attached.executor?.isRunning});publish();return;}
+ audit('ssh-connected',{executor:!!attached.executor?.isRunning,version:attached.snapshot.runtimeVersion});publish();quotaMonitor.refresh();
+}
+let lastConnectionParams=null;
+// Another runtime to the host of the primary connection, with the same credentials and settings.
+async function openWorker(){
+ const main=runtime;
+ if(!main||main.closed||!lastConnectionParams||isClaude()||shuttingDown)throw Error('GPT Codex SSH 尚未連線，無法開啟並行對話。');
+ const params={...lastConnectionParams,localCwd:main.localCwd||lastConnectionParams.localCwd,permissionMode:nativePolicy.resolveMode({},null,settings).effective};
+ const result=await handlers.get('runtime:connect')({sender:null},params);
+ if(!result.runtimeId)throw Error(result.status==='host-confirmation'?'主機金鑰已變更，請先在「SSH 連線」重新確認主機。':'並行對話的遠端 Agent 未成功啟動。');
+ const next=backend.openCodexRuntimes.get(result.runtimeId);
+ if(runtime!==main||main.closed||shuttingDown){if(next&&!next.closed)await handlers.get('runtime:disconnect')({},next.id).catch(()=>{});throw Error('主要連線已變更，並行對話未建立。');}
+ attach(next,{worker:true});
+ return next;
+}
+// A conversation leaves a runtime that is busy with another one. The engine keeps the idle copy
+// loaded until its unload delay; its later thread/closed must not reach the frontend.
+async function releaseThread(owner,threadId){
+ sessions.migrating.set(threadId,owner);
+ const loaded=owner.openCodexThreads?.has(threadId);
+ // Resolve when the engine reports the thread unloaded, so its rollout writer lock is free.
+ const closed=loaded?new Promise(resolve=>{(owner.openCodexClosedWaiters||=new Map()).set(threadId,resolve);const t=setTimeout(()=>{if(owner.openCodexClosedWaiters?.get(threadId)===resolve){owner.openCodexClosedWaiters.delete(threadId);resolve('timeout');}},20000);t.unref?.();}):Promise.resolve('not-loaded');
+ for(const key of ['openCodexThreads','openCodexDormantThreads','openCodexAgentReceipts','openCodexPermissionReceipts','openCodexGuardianReceipts'])owner[key]?.delete(threadId);
+ if(!owner.closed)await owner.rpc.request('thread/unsubscribe',{threadId},15000).catch(error=>audit('session-release-failed',{threadId,runtimeId:owner.id,message:error.message}));
+ const how=owner.closed?'owner-closed':await closed;
+ audit('session-thread-released',{threadId,runtimeId:owner.id,how});
+ const forget=setTimeout(()=>{if(sessions.migrating.get(threadId)===owner)sessions.migrating.delete(threadId);},120000);forget.unref?.();
+}
+async function closeWorkers(){
+ for(const w of [...sessions.workers]){sessions.forget(w);if(!w.closed)await handlers.get('runtime:disconnect')({},w.id).catch(error=>audit('session-worker-close-failed',{runtimeId:w.id,message:error.message}));}
+}
+// Keeps one spare runtime warm so the next parallel conversation starts at once, and closes
+// workers that idled for a while; their conversations reopen on the next request.
+async function maintainSessions(){
+ if(shuttingDown||connecting||permissionChanging||hostConfirmation||!isRemote()||isClaude()||!runtime||runtime.closed||!lastConnectionParams||!clients.size)return;
+ const now=Date.now(),spare=settings.parallelPrewarm===false?0:1,idle=sessions.idleWorkers().sort((a,b)=>(a.openCodexLastActivity||0)-(b.openCodexLastActivity||0));
+ for(const w of idle.slice(0,Math.max(0,idle.length-spare)))if(now-(w.openCodexLastActivity||0)>600000){sessions.forget(w);await handlers.get('runtime:disconnect')({},w.id).catch(error=>audit('session-worker-close-failed',{runtimeId:w.id,message:error.message}));}
+ // A worker that is only loading a conversation still counts as the spare.
+ if(spare&&![...sessions.workers].some(w=>!w.closed&&!w.run)&&sessions.capacity()&&!sessions.spawning)await sessions.open().catch(error=>audit('session-prewarm-failed',{message:error.message}));
+}
+// Thread requests follow the conversation; work that needs a free runtime may open one.
+async function selectRuntime(method,params){
+ if(!isRemote()||isClaude()||!runtime||runtime.closed||!sessions.needsRouting(method,params))return {runtime};
+ const handoffTurn=method==='turn/start'&&!!handoff&&handoff.isModel(handoff.selection(method,params));
+ const lease=require('./native-sessions.cjs').LEASE.has(method)&&workspace.needsLease(method,params)&&!handoffTurn;
+ const ephemeral=params?.ephemeral===true||known[params?.threadId]?.summary?.ephemeral===true;
+ const selected=await sessions.select(method,params,{lease,ephemeral});
+ if(selected.runtime)selected.runtime.openCodexLastActivity=Date.now();
+ return selected;
 }
 function notifyRemoteState(){
  // A peer's ChatGPT account is not a login to this Mac's native cloud UI.
@@ -275,6 +367,7 @@ const pendingPermissions=new WeakMap();
 const organization=new (require('./native-organization.cjs').NativeOrganization)(path.join(root,'native-organization.json'),{
  localRequest:async(method,params)=>{await readyLocal();return localRequest(method,params);},
  owns:(profile,threadId)=>known[threadId]?.profile===profile&&!known[threadId]?.deleted,
+ foreign:threadId=>!!known[threadId]?.summary&&!known[threadId]?.deleted,
  getThreads:profile=>Object.values(known).filter(t=>t.profile===profile),
  notify:(profile,message)=>{if(isRemote()&&!isClaude()&&profile===(runtime?.snapshot?.profileId||settings.profileId))for(const ws of clients)send(ws,message);}
 });
@@ -290,6 +383,7 @@ function runtimeEvent(event,payload){
  if(event==='claude:event'){claude?.event(payload);handoff?.claude.event(payload);if(payload.type==='closed'){if(!isClaude()&&peer?.cli?.id&&peer.cli.id===payload.runtimeId){audit('ssh-peer-closed',{agent:'claude',reason:payload.text||null});peerReconnect.schedule(peer);}if(!isClaude()&&handoff)notifyRemoteState();else publish();}return;}
  if(event==='opencodex:tool-policy'){if(process.argv.includes('--opencodex-test'))audit('tool-policy',payload);return;}
  if(event==='opencodex:latency'){if(process.argv.includes('--opencodex-test'))audit('latency',payload);return;}
+ if(event==='opencodex:goal'){audit(payload.type,payload);return;}
  for(const w of BrowserWindow.getAllWindows())w.webContents.send(event,payload);
  if(event!=='runtime:event'||payload.type!=='approval')return;
  const owner=backend.openCodexRuntimes.get(payload.runtimeId);
@@ -306,6 +400,8 @@ async function request(ws,method,params,fromQueue=false){
  if(method==='mcpServer/event/stream/stop')return eventStreams.stop(ws,params?.subscriptionId);
  if(method==='turn/interrupt'&&agents?.active)await agents.cancel();
  if(isClaude()&&claude.handles(method))return claude.request(method,params||{},fromQueue);
+ const selected=await selectRuntime(method,params);
+ const runtime=selected.runtime;
  const connected=runtime&&!runtime.closed;
  const profileId=runtime?.snapshot?.profileId||settings.profileId;
  // Same-thread model handoff: Claude turns run on the Claude peer, the thread stays in Codex.
@@ -328,8 +424,8 @@ async function request(ws,method,params,fromQueue=false){
    if(!connected)throw Error('GPT Codex SSH 尚未連線；切換模型需要讀取同一對話的歷史。');
    // The native title service runs a short ephemeral GPT thread beside the user's
    // first message; that work never shares this conversation or its workspace.
-   const codexWork=work=>!!work&&(!work.ephemeral||work.threadId===params.threadId);
-   if(agents?.active||codexWork(runtime.run)||codexWork(runtime.openCodexPreparing)||nativeShell.active||localTurns.size||(!fromQueue&&nativeQueue.starting))throw Error('目前回合尚未結束；所選模型會用於下一個回合。');
+   const codexWork=work=>!!work&&work.threadId===params.threadId;
+   if(agents?.active||codexWork(runtime.run)||codexWork(runtime.openCodexPreparing)||nativeShell.active?.remoteThreadId===params.threadId||localTurns.size||(!fromQueue&&nativeQueue.startingFor(params.threadId)))throw Error('目前回合尚未結束；所選模型會用於下一個回合。');
    const result=await handoff.start({...params,model:chosen},{cwd:known[params.threadId]?.localCwd||settings.cwd});
    audit('rpc',{method,handoff:handoff.owner(chosen).provider,success:true});
    // What actually runs: model and effort only, never message content.
@@ -337,10 +433,16 @@ async function request(ws,method,params,fromQueue=false){
   }
   if(method==='turn/steer'&&params?.threadId){
    const id=params.threadId,owner=runtime;
-   const check=()=>{if(!owner||owner.closed||runtime!==owner||!clients.has(ws)||known[id]?.profile!==profileId||known[id]?.deleted)throw Error('連線或對話已改變；訊息未送出。');};
+   const check=()=>{if(!sessions.alive(owner)||!clients.has(ws)||known[id]?.profile!==profileId||known[id]?.deleted)throw Error('連線或對話已改變；訊息未送出。');};
    check();
+   const active=()=>{const h=handoff.runningProvider(id),r=h?.claude.runtime?.run||(owner.run?.threadId===id?owner.run:null);return r?{turnId:r.turnId||r.turn?.id}:h||owner.openCodexPreparing?.threadId===id?{turnId:null}:null;};
+   // The turn ended, or the runtime lost it with the connection. Nothing is running to steer,
+   // so this message simply starts the next turn instead of failing with a stale error.
+   if(!active()&&!owner.run&&!owner.openCodexPreparing&&(handoff.changedForActive(id)||!owner.openCodexThreads?.has(id))){
+    const result=await request(ws,'turn/start',{threadId:id,input:params.input,clientUserMessageId:params.clientUserMessageId});
+    audit('rpc',{method,startedNextTurn:true,success:true});return {turnId:result.turn.id};
+   }
    if(handoff.restartForSteer(id)){
-    const active=()=>{const h=handoff.runningProvider(id),r=h?.claude.runtime?.run||(owner.run?.threadId===id?owner.run:null);return r?{turnId:r.turnId||r.turn?.id}:h||owner.openCodexPreparing?.threadId===id?{turnId:null}:null;};
     const result=await handoff.replaceActiveTurn(params,{active,check,interrupt:()=>request(ws,'turn/interrupt',{threadId:id,turnId:params.expectedTurnId}),start:p=>request(ws,'turn/start',p)});
     audit('rpc',{method,handoff:'restart-selected-model',success:true});return result;
    }
@@ -367,11 +469,14 @@ async function request(ws,method,params,fromQueue=false){
  if(method==='account/read')return {account:null,requiresOpenaiAuth:false};
  if(method.startsWith('thread/queue/')){
   if(known[params?.threadId]?.profile!==profileId)throw Error('此佇列不屬於目前 OpenCodex 主機。');
-  return nativeQueue.request(method,params,profileId);
+  const queued=await nativeQueue.request(method,params,profileId);
+  audit('rpc',{method,threadId:params.threadId,success:true,...(method==='thread/queue/add'?{queued:queued?.queuedSubmission?.id}:{})});
+  return queued;
  }
  if(!connected){
   if(method==='account/rateLimits/read')return {rateLimits:null,rateLimitsByLimitId:null};
-  if(method==='thread/list'||method==='thread/search')return organization.listPage(profileId,method,params||{},query=>routing.cachedPage(method,query,known,profileId));
+  // Offline, every host's cached conversation stays in the sidebar and opens from the cache.
+  if(method==='thread/list'||method==='thread/search')return organization.listPage(profileId,method,params||{},query=>routing.cachedPage(method,query,known,profileId,{scope:'all'}),{foreign:true});
   if(method==='thread/attachmentOwner/list')return {data:[],nextCursor:null};
   if(method==='thread/loaded/list'||method==='mcpServerStatus/list')return {data:[],nextCursor:null};
   if(known[params?.threadId]?.profile===profileId&&!known[params.threadId]?.deleted&&remoteThreadCache.has(params.threadId,profileId)){
@@ -385,10 +490,39 @@ async function request(ws,method,params,fromQueue=false){
  // The native UI asks for MCP status while opening a conversation, before thread/resume has
  // loaded it on the remote app-server. Forwarding then fails with "thread not found" and the
  // renderer shows its generic error page. An unloaded thread simply has no MCP servers yet.
+ // Every runtime is busy and none may be added: show the cached conversation; the next turn loads it.
+ if(selected.cached){
+  const cached=remoteThreadCache.has(params.threadId,profileId)?remoteThreadCache.get(params.threadId,profileId):null;
+  if(!cached)throw require('./native-sessions.cjs').limitError(sessions.limit()+1);
+  cached.thread=nativeShell.merge(cached.thread);audit('thread-cached-view',{threadId:params.threadId});
+  return organization.projectResult(profileId,nativePolicy.localSnapshot(cached,nativePolicy.resolveSelection({},known[params.threadId],settings),known[params.threadId]?.localCwd,known[params.threadId]?.permissionSnapshot));
+ }
  if(method==='mcpServerStatus/list'&&params?.threadId&&!runtime?.openCodexThreads?.has(params.threadId))return {data:[],nextCursor:null};
+ // Activating a goal starts a turn at once. Without a selected Mac environment that turn
+ // has no Mac tools, so the goal goes active only after a turn of ours has selected it.
+ if(method==='thread/goal/set'&&params?.threadId&&known[params.threadId]?.profile===profileId&&!known[params.threadId]?.deleted&&runtime.run?.threadId!==params.threadId&&runtime.openCodexPreparing?.threadId!==params.threadId&&(!runtime.openCodexThreads?.has(params.threadId)||runtime.openCodexDormantThreads?.has(params.threadId))){
+  const deps=bridge.runtimeDependencies;let current=null;
+  try{current=(await runtime.rpc.request('thread/goal/get',{threadId:params.threadId},10000))?.goal||null;}catch{/* A rejected set reports the real error below. */}
+  if(activatesGoal(params,current)){
+   const result=await backend.openCodexRequest(runtime,deps,method,{...params,status:'paused'});
+   deps.goalGuard.note(params.threadId);
+   await request(ws,'turn/start',{threadId:params.threadId,input:[{type:'text',text:'Mac 工具已就緒，請依目前目標繼續工作。',text_elements:[]}]});
+   return result;
+  }
+ }
  if(routing.collections.has(method)){
   const owner=runtime;
-  if(method==='thread/list'||method==='thread/search')return organization.listPage(profileId,method,params||{},query=>routing.ownedPage(owner.rpc,method,query,known,profileId));
+  if(method==='thread/list'||method==='thread/search')return organization.listPage(profileId,method,params||{},async query=>{
+   const page=await routing.ownedPage(owner.rpc,method,query,known,profileId);
+   // Conversations cached from other hosts stay listed; they open from the cache here.
+   if(!query.cursor)page.data=[...page.data,...routing.cachedAll(method,query,known,profileId,{scope:'others'})];
+   return page;
+  },{foreign:true});
+  if(method==='thread/loaded/list'&&sessions.workers.size){
+   const pages=await Promise.all(sessions.live().map(r=>routing.ownedPage(r.rpc,method,params,known,profileId).catch(()=>({data:[]}))));
+   const seen=new Set();
+   return {data:pages.flatMap(p=>p.data).filter(item=>{const id=typeof item==='string'?item:item?.threadId||item?.thread?.id||item?.id;if(!id||seen.has(id))return false;seen.add(id);return true;}),backwardsCursor:null,nextCursor:null};
+  }
   return routing.ownedPage(owner.rpc,method,params,known,profileId);
  }
  if(routing.threadScoped(method,params)){
@@ -396,8 +530,20 @@ async function request(ws,method,params,fromQueue=false){
   if(params?.threadId&&!known[params.threadId]&&method==='thread/read'&&runtime.openCodexSubagents){
    await runtime.openCodexSubagents.discover(params.threadId);
   }
+  if(['thread/attachment/list','thread/attachmentOwner/list'].includes(method)){
+   if(!known[params?.threadId]||known[params?.threadId]?.profile!==runtime.snapshot.profileId||known[params?.threadId]?.deleted){
+    return {data:[],nextCursor:null};
+   }
+  }
+  const threadProfile=known[params?.threadId]?.profile;
+  if(threadProfile&&threadProfile!==runtime.snapshot.profileId&&!known[params?.threadId]?.deleted&&remoteThreadCache.has(params.threadId,threadProfile)){
+   const cached=remoteThreadCache.get(params.threadId,threadProfile);
+   cached.thread=nativeShell.merge(cached.thread);
+   if(['thread/turns/list','thread/items/list'].includes(method))return nativeShell.listCached(method,params,cached.thread,{complete:cached.openCodexHistoryComplete===true});
+   if(method==='thread/read'||method==='thread/resume')return organization.projectResult(threadProfile,nativePolicy.localSnapshot(cached,nativePolicy.resolveSelection({},known[params.threadId],settings),known[params.threadId]?.localCwd,known[params.threadId]?.permissionSnapshot));
+  }
   if(params?.threadId&&(known[params.threadId]?.profile!==runtime.snapshot.profileId||known[params.threadId]?.deleted))throw Error('此對話不屬於目前 OpenCodex 主機或已刪除。');
-  if(!fromQueue&&nativeQueue.starting&&workspace.needsLease(method,params))throw Error('排隊訊息正在啟動，請稍候或停止目前工作。');
+  if(!fromQueue&&workspace.needsLease(method,params)&&(params?.threadId?nativeQueue.startingFor(params.threadId):nativeQueue.starting))throw Error('排隊訊息正在啟動，請稍候或停止目前工作。');
   if(method==='turn/interrupt')nativeQueue.pause(profileId,params.threadId);
   if(nativeShell.active){
    if(method==='turn/interrupt'&&params.threadId===nativeShell.active.remoteThreadId){await nativeShell.interrupt();return {};}
@@ -418,24 +564,27 @@ async function request(ws,method,params,fromQueue=false){
    const owner=runtime;
    if(!params.threadId||params.server!==owner.mcp?.name||!owner.toolHost?.openCodexMcpResourceRead)throw Error('此 Mac 外掛資源不屬於目前連線。');
    const cwd=owner.localCwd,permission=owner.permissionMode;
-   const current=()=>runtime===owner&&!owner.closed&&clients.has(ws)&&ws.readyState===1&&owner.localCwd===cwd&&owner.permissionMode===permission&&known[params.threadId]?.localCwd===cwd&&known[params.threadId]?.profile===owner.snapshot.profileId&&!known[params.threadId]?.deleted;
+   const current=()=>sessions.alive(owner)&&clients.has(ws)&&ws.readyState===1&&owner.localCwd===cwd&&owner.permissionMode===permission&&known[params.threadId]?.localCwd===cwd&&known[params.threadId]?.profile===owner.snapshot.profileId&&!known[params.threadId]?.deleted;
    return owner.toolHost.openCodexMcpResourceRead(params.uri,{isAuthorized:current,withNativeContext:nativeAppContext(owner,ws,params.threadId,current)});
   }
   if(method==='mcpServer/event/stream/start')return eventStreams.start(runtime,ws,params);
   const leaseOwner=runtime;
-  const lease=workspace.needsLease(method,params)?await workspace.acquireAsync(leaseOwner,{threadId:params?.threadId,restore:method==='thread/resume',ephemeral:params?.ephemeral===true||known[params?.threadId]?.summary?.ephemeral===true,isCurrent:()=>runtime===leaseOwner&&clients.has(ws)&&ws.readyState===1}):null;
+   // A conversation loaded on a runtime that is running another conversation is shown read-only.
+  const attachable=()=>method==='thread/resume'&&(workspace.attachesToRun(leaseOwner,params?.threadId)||(selected.attach===true&&!!leaseOwner.openCodexThreads?.has(params?.threadId)&&sessions.running(leaseOwner,params?.threadId)));
+  const lease=!attachable()&&workspace.needsLease(method,params)?await workspace.acquireAsync(leaseOwner,{threadId:params?.threadId,restore:method==='thread/resume',attachable,ephemeral:params?.ephemeral===true||known[params?.threadId]?.summary?.ephemeral===true,isCurrent:()=>sessions.alive(leaseOwner)&&clients.has(ws)&&ws.readyState===1}):null;
+  const attaching=!lease&&attachable();
   let selectedCwd,pendingPermission,backendAccepted=false;const requestOwner=runtime,previousPermission=runtime.permissionMode,previousReviewer=guardianRuntime.reviewer(runtime.openCodexReviewer);
   try{
-  const explicitPermission=nativePolicy.selectedMode(params||{});
+  const explicitPermission=attaching?null:nativePolicy.selectedMode(params||{});
   const selection=nativePolicy.resolveSelection(params||{},known[params?.threadId],settings);
-  const explicitReviewer=params?.approvalsReviewer!=null;
+  const explicitReviewer=!attaching&&params?.approvalsReviewer!=null;
   if(!lease&&explicitReviewer&&selection.reviewer!==previousReviewer)throw Error('請先停止工作，再切換審查模式。');
   if(lease){
    selectedCwd=await workspace.resolveCwd(params,known[params?.threadId],settings.cwd);lease.check();
    await bridge.selectWorkspace(runtime,selectedCwd,selection.effective);lease.check();
    guardianRuntime.select(runtime,selection.reviewer);
   }
-  if(method==='thread/resume'||(['turn/start','review/start','thread/settings/update'].includes(method)&&!runtime.openCodexThreads?.has(params.threadId))){
+  if((method==='thread/resume'&&!attaching)||(['turn/start','review/start','thread/settings/update'].includes(method)&&!runtime.openCodexThreads?.has(params.threadId))){
    const previous=known[params.threadId]?.environmentId;
    if(previous&&previous!==runtime.executor.environmentId){
     const environment=await runtime.executor.register(runtime.rpc,runtime.executorUrl,previous);
@@ -443,7 +592,13 @@ async function request(ws,method,params,fromQueue=false){
     if(runtime.mcp)runtime.mcp.environmentId=environment.environmentId;
    }
   }
-  if(method==='turn/interrupt'&&runtime.run?.threadId===params.threadId){await handlers.get('runtime:cancel')({},runtime.id,runtime.run.requestId);return {};}
+  if(method==='turn/interrupt'){
+   let targetRuntime=runtime,activeRun=workspace.runForThread(runtime,params?.threadId);
+   if(!activeRun&&sessions){for(const r of sessions.live()){const found=workspace.runForThread(r,params?.threadId);if(found){targetRuntime=r;activeRun=found;break;}}}
+   if(activeRun){await handlers.get('runtime:cancel')({},targetRuntime.id,activeRun.requestId);return {};}
+   try{return await backend.openCodexRequest(requestOwner,bridge.runtimeDependencies,wireMethod,remoteParams);}
+   catch(_err){return {};}
+  }
   if(method==='thread/settings/update'){
    let entries=pendingPermissions.get(requestOwner);if(!entries){entries=new Map();pendingPermissions.set(requestOwner,entries);}
    if(entries.has(params.threadId))throw Error('對話設定正在更新，請稍候。');
@@ -477,7 +632,7 @@ async function request(ws,method,params,fromQueue=false){
    const owner=requestOwner;
    if(!params.threadId||params.server!==owner.mcp?.name||!owner.toolHost?.openCodexMcpToolCall)throw Error('此 Mac 外掛操作不屬於目前連線。');
    const controller=new AbortController();
-   const current=()=>{try{lease?.check();return runtime===owner&&!owner.closed&&clients.has(ws)&&ws.readyState===1&&known[params.threadId]?.profile===owner.snapshot.profileId&&!known[params.threadId]?.deleted;}catch{return false;}};
+   const current=()=>{try{lease?.check();return sessions.alive(owner)&&clients.has(ws)&&ws.readyState===1&&known[params.threadId]?.profile===owner.snapshot.profileId&&!known[params.threadId]?.deleted;}catch{return false;}};
    const monitor=setInterval(()=>{if(!current())controller.abort();},100);
    try{
     return await owner.toolHost.openCodexMcpToolCall(params,{signal:controller.signal,isAuthorized:current,withNativeContext:nativeAppContext(owner,ws,params.threadId,current),authorizeTool:call=>nativePolicy.appApproval({
@@ -493,7 +648,8 @@ async function request(ws,method,params,fromQueue=false){
   const mutationSource=nativeShell.hasHistory(params.threadId)&&['thread/fork','thread/revert'].includes(method)?(await nativeShell.readThread(requestOwner.rpc,{threadId:params.threadId,includeTurns:true},knownEmpty)).thread:null;
   const historyPlan=nativeShell.prepareHistoryMutation(method,params,mutationSource);
   lease?.check();
-  const raw=wireMethod==='thread/resume'?await resumeThread(remoteParams):wireMethod==='thread/read'?await nativeShell.readThread(requestOwner.rpc,remoteParams,knownEmpty):['thread/turns/list','thread/items/list'].includes(wireMethod)?await nativeShell.list(requestOwner.rpc,wireMethod,remoteParams,{knownEmpty}):await backend.openCodexRequest(requestOwner,bridge.runtimeDependencies,wireMethod,remoteParams);
+  if(attaching)audit('thread-attached',{threadId:params.threadId,runtimeId:requestOwner.id,readOnly:!workspace.attachesToRun(requestOwner,params.threadId)});
+  const raw=wireMethod==='thread/resume'?await (attaching?workspace.attach(requestOwner,remoteParams):resumeThread(remoteParams)):wireMethod==='thread/read'?await nativeShell.readThread(requestOwner.rpc,remoteParams,knownEmpty):['thread/turns/list','thread/items/list'].includes(wireMethod)?await nativeShell.list(requestOwner.rpc,wireMethod,remoteParams,{knownEmpty}):await backend.openCodexRequest(requestOwner,bridge.runtimeDependencies,wireMethod,remoteParams);
   backendAccepted=true;
   const resultCwd=selectedCwd||known[params?.threadId]?.localCwd||requestOwner.localCwd;
   const verifiedPermission=permissionSnapshot(requestOwner,selection,resultCwd,params?.threadId,wireMethod==='thread/read');
@@ -543,13 +699,13 @@ handle('opencodex:approval-revoke',(event,id)=>{
 handle('opencodex:full-access',async(event,enabled)=>{
  if(!event.senderFrame||event.senderFrame!==event.sender.mainFrame||event.senderFrame.url!=='app://-/index.html')throw Error('權限管理僅限 OpenCodex 主視窗。');
  if(!isRemote())throw Error('最高權限開關適用於 SSH 模式。');
- const busy=connecting||permissionChanging||agents?.active||claude?.busy||handoff?.busy||claude?.queue.starting||runtime?.run||runtime?.openCodexPreparing||localTurns.size||nativeShell.active||nativeQueue.starting;
+ const busy=connecting||permissionChanging||agents?.active||claude?.busy||handoff?.busy||claude?.queue.starting||anyRun()||localTurns.size||nativeShell.active||nativeQueue.starting;
  if(busy)throw Error('請先停止目前工作，再切換最高權限。');
  connectionIntent++;permissionChanging=true;publish();
  try{
   await nativePolicy.setFullAccess({enabled,settings,busy:false,save,apply:async mode=>{
    const apply=(r,m)=>r.provider?external.invoke(r.provider,'claude:permission',r.cli.id,m):handlers.get(r.cli?'claude:permission':'runtime:permission')({},r.cli?.id||r.id,m);
-   const changed=[];try{for(const r of new Set([runtime,claude?.runtime,peer,...external.runtimes.values()].filter(r=>r&&!r.closed))){const old=r.permissionMode;await apply(r,mode);changed.push([r,old]);}}
+   const changed=[];try{for(const r of new Set([runtime,...sessions.workers,claude?.runtime,peer,...external.runtimes.values()].filter(r=>r&&!r.closed))){const old=r.permissionMode;await apply(r,mode);changed.push([r,old]);}}
    catch(e){for(const [r,old]of changed.reverse())await apply(r,old);throw e;}
   }});
   audit('full-access-changed',{enabled:settings.fullAccess===true});
@@ -569,7 +725,7 @@ handle('opencodex:profile-save',async(_event,input)=>{if(connecting)throw Error(
 handle('opencodex:profile-delete',async(_event,id)=>{if(connecting||claude?.connected&&claude.profile===id||runtime&&!runtime.closed&&runtime.snapshot.profileId===id||peer&&!peer.closed&&(peer.network?.profileId||peer.snapshot?.profileId)===id)throw Error('請先中斷此主機的連線。');connectionIntent++;pendingConnection=null;hostConfirmation=null;return handlers.get('profiles:delete')({},id);});
 handle('opencodex:connect',async(_event,input)=>{await connectBridge(input||{});return publicState();});
 handle('opencodex:cancel-confirmation',()=>{connectionIntent++;pendingConnection=null;hostConfirmation=null;publish();return publicState();});
-handle('opencodex:disconnect',async()=>{if(connecting||permissionChanging||agents?.active||claude?.busy||handoff?.busy||claude?.queue.starting||runtime?.run||runtime?.openCodexPreparing||localTurns.size||nativeShell.active||nativeQueue.starting)throw Error('請先等候連線完成或停止目前工作。');connectionIntent++;mainReconnect.cancel();pendingDefault=null;await external?.closeAll();await disconnectPeer();if(isClaude())await claude.disconnect();const previous=runtime;runtime=null;pendingConnection=null;hostConfirmation=null;quotaMonitor.reset(null,'disconnected');if(previous&&!previous.closed)await handlers.get('runtime:disconnect')({},previous.id);bridgeError=null;publish();notifyRemoteState();return publicState();});
+handle('opencodex:disconnect',async()=>{if(connecting||permissionChanging||agents?.active||claude?.busy||handoff?.busy||claude?.queue.starting||anyRun()||localTurns.size||nativeShell.active||nativeQueue.starting)throw Error('請先等候連線完成或停止目前工作。');connectionIntent++;mainReconnect.cancel();pendingDefault=null;await external?.closeAll();await disconnectPeer();await closeWorkers();if(isClaude())await claude.disconnect();const previous=runtime;runtime=null;pendingConnection=null;hostConfirmation=null;quotaMonitor.reset(null,'disconnected');if(previous&&!previous.closed)await handlers.get('runtime:disconnect')({},previous.id);bridgeError=null;publish();notifyRemoteState();return publicState();});
 handle('opencodex:reconnect',async()=>{await connectBridge();return publicState();});
 // With the Claude collaborator connected, GPT Codex mode hosts both models:
 // choosing the new-conversation default needs no relaunch.
@@ -592,7 +748,7 @@ handle('opencodex:mode',async(_event,input)=>{
  if(input.mode==='ssh'&&isRemote()&&input.sshAgent)return selectDefault({engine:input.sshAgent});
  if(input.mode==='bridge')input={...input,mode:'ssh'};
  if(!['official','custom','ssh'].includes(input.mode))throw Error('無效模式。');
- if(connecting||permissionChanging||agents?.active||claude?.busy||handoff?.busy||claude?.queue.starting||runtime?.run||runtime?.openCodexPreparing||localTurns.size||nativeShell.active||nativeQueue.starting)throw Error('請先停止工作，再切換模式。');
+ if(connecting||permissionChanging||agents?.active||claude?.busy||handoff?.busy||claude?.queue.starting||anyRun()||localTurns.size||nativeShell.active||nativeQueue.starting)throw Error('請先停止工作，再切換模式。');
  if(input.sshAgent&&!['codex','claude'].includes(input.sshAgent))throw Error('無效的遠端 Agent。');
  connectionIntent++;
  if(input.mode==='custom'&&!input.engine){
@@ -648,11 +804,14 @@ async function start(){
     if(h.claude.preparing?.threadId)h.claude.preparing.cancelled=true;
    }
    if(!clients.size&&nativeShell.active)nativeShell.interrupt().catch(()=>{});
-   if(!clients.size&&runtime?.run)handlers.get('runtime:cancel')({},runtime.id,runtime.run.requestId).catch(()=>{});
+   if(!clients.size)for(const r of sessions.live())if(r.run)handlers.get('runtime:cancel')({},r.id,r.run.requestId).catch(()=>{});
    audit('frontend-disconnected');
   });
  });
  backend=require(path.join(abRoot,'dist-main/runtime-backend.js'));
+ // Parallel conversations may move between runtimes; release an unsubscribed idle thread (and its
+ // cross-process rollout writer lock) at once instead of after the 60s default.
+ try{require(path.join(abRoot,'dist-main/runtime-policy.js')).runtimeIsolationOverrides.thread_unload_delay_secs=0;}catch(error){audit('unload-override-failed',{message:error.message});}
  agents=new (require('./native-agents.cjs').NativeAgents)({reservePeers:(peers,id)=>require('./native-agents.cjs').reserveAgentRoots(peers,id,{codex:backend,claude:bridge.claudeBackend}),getPeers:()=>isClaude()?{codex:peer,claude:claude?.runtime}:{codex:runtime,claude:peer},invoke:(name,...args)=>handlers.get(name)({},...args),onState:publish});
  bridge=require('./ssh-runtime.cjs')({root,abRoot,emit:runtimeEvent,onNativeRequest:forwardNativeRequest,agentTools:()=>[agents.spec()]});
  claude=new (require('./native-claude.cjs').NativeClaude)({root,settings,saveSettings:save,invoke:(name,...args)=>handlers.get(name)({},...args),emit:message=>{for(const ws of clients)send(ws,message);},onState:publish,selectWorkspace:bridge.selectClaudeWorkspace,refreshTools:bridge.runtimeDependencies.refreshNativeTools,forwardRequest:forwardNativeRequest,grants:approvalGrants,onError:error=>{bridgeError=error.message;audit('claude-error',{message:error.message});publish();},showApproval:async options=>{const parent=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('app://'));if(!parent||parent.isDestroyed())return {response:0};return dialog.showMessageBox(parent,options);}});
@@ -670,8 +829,8 @@ async function start(){
    onError:error=>{bridgeError=error.message;audit('handoff-error',{message:error.message});publish();},
    showApproval:async options=>{const parent=BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('app://'));if(!parent||parent.isDestroyed())return {response:0};return dialog.showMessageBox(parent,options);}});
   const primary=new NativeHandoff({root,claude:handoffClaude,
-   readThread:async threadId=>{const owner=runtime;if(!owner||owner.closed)throw Error('GPT Codex SSH 尚未連線。');const read=await nativeShell.readThread(owner.rpc,{threadId,includeTurns:true},known[threadId]?.emptyHistory===true);return {...read,thread:nativeShell.merge(read.thread)};},
-   inject:params=>{const owner=runtime;if(!owner||owner.closed)throw Error('GPT Codex SSH 尚未連線。');return owner.rpc.request('thread/inject_items',params);},
+   readThread:async threadId=>{const owner=sessions.ownerOf(threadId)||runtime;if(!owner||owner.closed)throw Error('GPT Codex SSH 尚未連線。');const read=await nativeShell.readThread(owner.rpc,{threadId,includeTurns:true},known[threadId]?.emptyHistory===true);return {...read,thread:nativeShell.merge(read.thread)};},
+   inject:params=>{const owner=sessions.ownerOf(params?.threadId)||runtime;if(!owner||owner.closed)throw Error('GPT Codex SSH 尚未連線。');return owner.rpc.request('thread/inject_items',params);},
    onError:error=>{bridgeError='Claude 回合寫回 GPT 對話失敗：'+error.message;audit('handoff-error',{message:error.message});publish();}});
   handoff=new UnifiedHandoff(primary,{root});
   for(const [provider,label]of [['grok','Grok'],['antigravity','Antigravity']]){
@@ -731,10 +890,11 @@ async function start(){
   setTimeout(()=>{const menu=Menu.getApplicationMenu();if(menu){const {MenuItem}=require('electron');menu.append(new MenuItem({label:'OpenCodex',submenu:[{label:'模式與連線設定…',click:showControls},{label:'SSH 連線…',accelerator:'CmdOrCtrl+Shift+B',click:openManager},{label:'顯示資料目錄',click:()=>require('electron').shell.openPath(root)}]}));Menu.setApplicationMenu(menu);}},2500);
  });
  const quotaTimer=setInterval(()=>{void connectProviders();void refreshQuotas();if(peer?.closed)peerReconnect.ensure(peer);if(!isClaude()&&runtime?.closed&&!shuttingDown)mainReconnect.ensure(runtime);},30000);quotaTimer.unref();
+ const sessionTimer=setInterval(()=>{void maintainSessions();},20000);sessionTimer.unref();
  app.on('before-quit',event=>{
   if(shuttingDown)return;shuttingDown=true;event.preventDefault();peerReconnect.stop();mainReconnect.stop();
   // One failing step must never leave the app running with its windows closed.
-  const steps={timer:()=>clearInterval(quotaTimer),agents:()=>agents?.cancel().catch(()=>{}),queue:()=>nativeQueue.close(),claude:()=>claude?.close(),handoff:()=>handoff?.close(),external:()=>external?.closeAll(),
+  const steps={timer:()=>{clearInterval(quotaTimer);clearInterval(sessionTimer);},agents:()=>agents?.cancel().catch(()=>{}),queue:()=>nativeQueue.close(),claude:()=>claude?.close(),handoff:()=>handoff?.close(),external:()=>external?.closeAll(),
    claudeRuntimes:()=>bridge?.claudeBackend.stopAllClaudeLocalRuntimes(),runtimes:()=>backend?.stopAllRuntimes(bridge.runtimeDependencies),tools:()=>bridge?.closeNativeTools(),local:()=>localChild?.kill('SIGTERM'),server:()=>server.close()};
   for(const [step,run] of Object.entries(steps)){try{run();}catch(error){audit('shutdown-error',{step,message:error.message});}}
   // The native main process may still await its own exit work (for example a telemetry

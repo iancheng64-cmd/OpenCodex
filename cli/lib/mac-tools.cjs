@@ -5,6 +5,9 @@ const fs=require('node:fs'),path=require('node:path');
 const cfg=require('./config.cjs');
 const {LocalToolHost}=cfg.mod('local-tool-host.js');
 const {LoopbackForward}=cfg.mod('loopback-forward.js');
+const agentWorkspace=require(path.join(cfg.repoRoot,'src/agent-environment.cjs'));
+const environment=new agentWorkspace.AgentEnvironment({appRoot:cfg.appSupport,codexHome:path.join(cfg.appSupport,'codex-official')});
+agentWorkspace.installCoreTools(cfg.mod('agent-core-tools.js').AgentCoreTools,environment);
 function localTools(resources,options){
  const tools={};
  const computer=path.join(resources,'agentbridge/computer-use/claudex-computer-use');
@@ -23,6 +26,6 @@ async function startToolHost({conn,cwd,agentRole,permissionMode,resources,option
  const forward=new LoopbackForward(conn,endpoint.port);
  let port;
  try{port=await forward.start();}catch(e){await host.stop();throw e;}
- return {host,forward,endpoint:{...endpoint,remoteUrl:'http://127.0.0.1:'+port+'/mcp'},async stop(){forward.stop();await host.stop();}};
+ return {host,forward,environment,endpoint:{...endpoint,remoteUrl:'http://127.0.0.1:'+port+'/mcp'},async stop(){forward.stop();await host.stop();}};
 }
 module.exports={startToolHost};

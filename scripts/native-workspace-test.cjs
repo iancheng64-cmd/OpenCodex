@@ -7,6 +7,21 @@ async function test(name,fn){await fn();tests.push(name);}
  try{
   const a=path.join(temp,'a'),b=path.join(temp,'b'),alias=path.join(temp,'alias');
   await fs.mkdir(a);await fs.mkdir(b);await fs.symlink(a,alias);await fs.writeFile(path.join(a,'file'),'test');
+  await test('a window opened during a turn attaches to it while other threads still wait',async()=>{
+   const run={threadId:'t1'},requests=[];
+   assert.equal(workspace.attachesToRun(run,'t1'),true);
+   assert.equal(workspace.attachesToRun(run,'t2'),false);
+   assert.equal(workspace.attachesToRun(null,'t1'),false);
+   assert.equal(workspace.attachesToRun(run,undefined),false);
+   const runtime={run,rpc:{request:async(method,params)=>{requests.push([method,params]);return {thread:{id:params.threadId}};}}};
+   await workspace.attach(runtime,{threadId:'t1',excludeTurns:true,cwd:'/ignored',config:{ignored:true}});
+   assert.deepEqual(requests,[['thread/resume',{threadId:'t1',excludeTurns:true}]]);
+   const owner={openCodexPreparing:{threadId:'t1'}};
+   const queued=workspace.acquireAsync(owner,{threadId:'t1',restore:true,attachable:()=>workspace.attachesToRun(owner.run,'t1')});
+   owner.openCodexPreparing=null;owner.run=run;
+   assert.equal(await queued,null);
+   await assert.rejects(workspace.acquireAsync(owner,{threadId:'t2',restore:true,attachable:()=>workspace.attachesToRun(owner.run,'t2')}),/工作仍在啟動或執行/);
+  });
   await test('native project selection resolves Mac directories and rejects invalid or foreign paths',async()=>{
    assert.equal(await workspace.resolveCwd({cwd:alias},{localCwd:b},b),a);
    assert.equal(await workspace.resolveCwd({}, {localCwd:b},a),b);

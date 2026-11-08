@@ -3,12 +3,14 @@
 // Mirrors vendor/agentbridge runtime-backend.js without Electron.
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const cfg=require('../config.cjs');
+const {runtimeInstructions}=require(path.join(cfg.repoRoot,'src/agent-environment.cjs'));
+const {GoalGuard}=require(path.join(cfg.repoRoot,'src/native-goal-guard.cjs'));
 const {AppServerRpc,appServerCommand,chooseStdioFlag,accountSummary,modelSummary}=cfg.mod('app-server-rpc.js');
 const {captureRemote,remoteLaunchError}=cfg.mod('remote-shell.js');
 const {parseCodexVersion,findHostInstallation}=cfg.mod('local-code-mode-host.js');
 const {LocalExecServer}=cfg.mod('local-exec-server.js');
 const {isolatedRuntimeArgs,macThreadConfig,validateMacMcpInventory,isVerifiedExecutorVersion,VERIFIED_EXECUTOR_VERSIONS}=cfg.mod('runtime-policy.js');
-const {macRuntimeInstructions,writeExtensionManifest}=cfg.mod('runtime-extensions.js');
+const {writeExtensionManifest}=cfg.mod('runtime-extensions.js');
 const {codexPermissionPolicy}=cfg.mod('permission-policy.js');
 const {rateLimitSummary,mergeRateLimitSummary}=cfg.mod('runtime-usage.js');
 const {runtimeFailure}=cfg.mod('runtime-errors.js');
@@ -18,6 +20,7 @@ class CodexDriver{
   Object.assign(this,{ssh,cwd,executable:executable||'codex',permissionMode,resources,toolOptions,onEvent,approve,askUser,authorizeTool,version});
   this.id='codex';this.label='Codex';this.runtimeId=crypto.randomUUID();this.closed=false;this.run=null;this.quota=null;this.catalog={items:[],warnings:[]};
   this.manifestPath=path.join(cfg.cliRoot,'runtime-extensions',this.runtimeId+'.json');
+  this.goalGuard=new GoalGuard({file:path.join(cfg.cliRoot,'goal-holds.json')});this.selectedThreads=new Set();
  }
  get busy(){return !!this.run;}
  emit(e){this.onEvent({provider:'codex',runtimeId:this.runtimeId,...e});}
@@ -36,7 +39,7 @@ class CodexDriver{
   const executorUrl=await this.executor.reverseForward(conn);
   // The Mac MCP host is reached by the remote app-server through the executor environment, so no loopback forward is needed.
   this.tools=await startToolHost({conn,cwd:this.cwd,agentRole:'codex',permissionMode:this.permissionMode,resources:this.resources,options:{...this.toolOptions,forward:false},authorize:call=>this.authorize(call)});
-  this.mcp={name:'agentbridge_mac_'+crypto.randomUUID().replaceAll('-',''),url:this.tools.endpoint.url,token:this.tools.endpoint.token,environmentId:this.executor.environmentId};
+  this.mcp={name:'opencodex_mac_'+crypto.randomUUID().replaceAll('-',''),url:this.tools.endpoint.url,token:this.tools.endpoint.token,environmentId:this.executor.environmentId};
   const args=['app-server',...(flag==='--stdio'?['--stdio']:['--listen','stdio://']),...isolatedRuntimeArgs()];
   const channel=await new Promise((resolve,reject)=>conn.exec(appServerCommand(platform,this.executable,args,true),{pty:false},(e,s)=>e?reject(e):resolve(s)));
   let stderr='';channel.stderr.on('data',b=>{stderr=(stderr+b).slice(-2000);});
@@ -104,7 +107,7 @@ class CodexDriver{
   else if(['item/started','item/completed'].includes(m.method)&&['commandExecution','fileChange','mcpToolCall'].includes(p.item?.type)){
    const item=p.item,end=m.method==='item/completed';const content=Array.isArray(item.result?.content)?item.result.content:[];
    const text=typeof item.aggregatedOutput==='string'?item.aggregatedOutput.slice(-16000):content.filter(b=>b?.type==='text').map(b=>b.text).join('\n').slice(-16000);
-   const title=item.type==='commandExecution'?(Array.isArray(item.command)?item.command.join(' '):item.command||'shell'):item.type==='fileChange'?'修改檔案 '+(item.changes||[]).map(c=>c.path).filter(Boolean).join(', '):(item.tool||item.server||'tool')+(item.server&&!String(item.server).startsWith('agentbridge_mac')?' ('+item.server+')':'');
+   const title=item.type==='commandExecution'?(Array.isArray(item.command)?item.command.join(' '):item.command||'shell'):item.type==='fileChange'?'修改檔案 '+(item.changes||[]).map(c=>c.path).filter(Boolean).join(', '):(item.tool||item.server||'tool')+(item.server&&!String(item.server).startsWith('opencodex_mac')?' ('+item.server+')':'');
    this.emit({type:'tool',itemId:item.id,tool:item.tool||item.type,title,text:end?text:JSON.stringify(item.arguments||{}),status:end?(item.status==='failed'||item.error||item.result?.isError?'error':'completed'):'running'});
   }
   else if(m.method==='item/started'&&p.item?.type==='reasoning')this.emit({type:'activity',text:'正在思考'});
@@ -132,7 +135,12 @@ class CodexDriver{
     const configuration=await this.rpc.request('config/read',{includeLayers:false});
     if(this.run!==run)return;
     const config=macThreadConfig(configuration.config,this.mcp,70);
-    const base={developerInstructions:[macRuntimeInstructions(this.cwd,this.manifestPath,this.tools.host.status().tools,this.catalog),input.systemPrompt].filter(Boolean).join('\n\n'),model:input.model||undefined,config,...codexPermissionPolicy(this.permissionMode)};
+    const status=this.tools.host.status(),instructions=await runtimeInstructions({environment:this.tools.environment,cwd:this.cwd,tools:status.tools,extensions:status.extensions});
+    if(this.run!==run)return;
+    const base={developerInstructions:[instructions,input.systemPrompt].filter(Boolean).join('\n\n'),model:input.model||undefined,config,...codexPermissionPolicy(this.permissionMode)};
+    // The CLI has no goal controls: an active goal stays paused for this session and
+    // goes active again in cleanup, so it never runs a turn this CLI cannot track.
+    if(input.conversationId&&!this.selectedThreads.has(input.conversationId))await this.goalGuard.hold(this.rpc,input.conversationId);
     const thread=await this.rpc.request(input.conversationId?'thread/resume':'thread/start',input.conversationId?{threadId:input.conversationId,...base}:{...base,environments:[{environmentId:this.executor.environmentId,cwd:this.cwd}]});
     if(this.run!==run)return;
     run.threadId=thread.thread.id;
@@ -148,6 +156,7 @@ class CodexDriver{
     const result=await this.rpc.request('turn/start',{threadId:run.threadId,environments:[{environmentId:this.executor.environmentId,cwd:this.cwd}],input:text.map(t=>({type:'text',text:t,text_elements:[]})),model:input.model||undefined,effort:input.effort||undefined});
     if(this.run!==run)return;
     run.turnId=result.turn.id;
+    this.selectedThreads.add(run.threadId);
     if(run.cancelled)await this.rpc.request('turn/interrupt',{threadId:run.threadId,turnId:run.turnId});
    }catch(e){
     if(this.run!==run)return;
@@ -183,7 +192,7 @@ class CodexDriver{
   this.emit({type:'closed',text:reason});
   void this.cleanup();
  }
- async cleanup(){try{this.rpc?.close();}catch{}this.executor?.stop();await this.tools?.stop().catch(()=>{});try{fs.rmSync(this.manifestPath,{force:true});}catch{}}
+ async cleanup(){await Promise.race([Promise.all([...this.goalGuard.holds.keys()].map(id=>this.goalGuard.release(this.rpc,id))),new Promise(resolve=>setTimeout(resolve,3000))]);try{this.rpc?.close();}catch{}this.executor?.stop();await this.tools?.stop().catch(()=>{});try{fs.rmSync(this.manifestPath,{force:true});}catch{}}
  async stop(){if(this.closed)return;this.closed=true;const run=this.run;this.run=null;if(run)this.emit({type:'done',status:'cancelled',conversationId:run.threadId,requestId:run.requestId});await this.cleanup();}
 }
 module.exports={CodexDriver};

@@ -11,8 +11,8 @@ const methods=new Set(['threadSection/list','threadSection/create','threadSectio
  'project/list','project/read','project/create','project/import','project/update','project/delete','project/move','thread/section/move']);
 const id=v=>typeof v==='string'&&v.length>0&&v.length<=4096;
 class NativeOrganization {
- constructor(file,{localRequest,owns=()=>false,getThreads=null,notify=()=>{},clock=()=>Math.floor(Date.now()/1000)}={}){
-  this.file=file;this.localRequest=localRequest;this.owns=owns;this.getThreads=getThreads;this.notify=notify;this.clock=clock;this.tail=Promise.resolve();this.volatile=new Map();
+ constructor(file,{localRequest,owns=()=>false,foreign=()=>false,getThreads=null,notify=()=>{},clock=()=>Math.floor(Date.now()/1000)}={}){
+  this.file=file;this.localRequest=localRequest;this.owns=owns;this.foreign=foreign;this.getThreads=getThreads;this.notify=notify;this.clock=clock;this.tail=Promise.resolve();this.volatile=new Map();
   try{
    this.state=JSON.parse(fs.readFileSync(file,'utf8'));
    if(this.state.version!==1||!this.state.sections||!this.state.projects||!this.state.profiles)throw Error('版本或格式無效');
@@ -235,7 +235,7 @@ class NativeOrganization {
  }
  // fetchPage must already apply host ownership and local cwd filtering. Do not
  // pass unfiltered peer rows here: sections are not an authorization boundary.
- async listPage(profile,method,params={},fetchPage){
+ async listPage(profile,method,params={},fetchPage,{foreign=false}={}){
   // A fresh offline install has no selected SSH profile or owned threads yet.
   if(!id(profile))return {data:[],backwardsCursor:null,nextCursor:null};
   const query=this.remoteListParams(params);delete query.cursor;query.limit=100;
@@ -253,7 +253,7 @@ class NativeOrganization {
    const result=await fetchPage({...query,cursor});
    if(!Array.isArray(result?.data))throw Error('對話清單無效。');
    for(const row of result.data){
-    const thread=row?.thread||row;if(!thread?.id||!this.owns(profile,thread.id))continue;
+    const thread=row?.thread||row;if(!thread?.id||!(this.owns(profile,thread.id)||(foreign&&this.foreign(thread.id))))continue;
     if(ids.has(thread.id))continue;ids.add(thread.id);
     const projected=this.projectThread(profile,thread);
     if(own(params,'sectionId')&&(projected.section?.id??null)!==(params.sectionId??null))continue;

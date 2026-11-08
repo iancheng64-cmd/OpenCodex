@@ -20,7 +20,7 @@ function selectedMode(params={}){
 async function localApproval({event,runtime,respond,show,isPending,grants,getScope=()=>null,onChange=()=>{},onError=()=>{}}){
  if(event.type!=='approval'||!runtime?.run?.openCodex||!isPending())return false;
  const active=runtime.requests?.get(event.approvalId)?.openCodexRun||runtime.run,scope=getScope(),revision=grants?.revision;
- const current=()=>isPending()&&(active.parentThreadId?runtime.openCodexSubagents?.isActive(active):runtime.run===active)&&!runtime.closed&&!active.cancelled&&!active.backgroundTextOnly;
+ const current=()=>isPending()&&(active.parentThreadId?runtime.openCodexSubagents?.isActive(active):(runtime.runs?runtime.runs.get(active.threadId)===active:runtime.run===active))&&!runtime.closed&&!active.cancelled&&!active.backgroundTextOnly;
  const sameScope=()=>scope&&require('./native-approvals.cjs').idFor(getScope())===require('./native-approvals.cjs').idFor(scope);
  const controller=new AbortController();let monitor;
  try{

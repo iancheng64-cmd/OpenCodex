@@ -59,7 +59,7 @@ class NativeShell {
    let result;
    try{result=await rpc.request(method,{...params,cursor,limit:100,sortDirection:'asc'});}
    catch(error){
-    if(page===0&&knownEmpty&&error.message==='list_turns is not supported yet')return [];
+    if(page===0&&(knownEmpty||error.message==='list_turns is not supported yet'||error.message?.includes('not materialized yet')||error.message?.includes('unavailable before first user message')))return [];
     throw error;
    }
    if(!Array.isArray(result.data))throw Error('遠端歷史回應缺少資料。');
@@ -101,6 +101,10 @@ class NativeShell {
    if(typeof params.cursor==='object'){
     if(kind!=='items'||!scope.turnId||params.cursor.type!=='item'||typeof params.cursor.itemId!=='string')throw Error('項目錨點需要有效的 turnId 與 itemId。');
     position={anchor:[scope.turnId,params.cursor.itemId],inclusive:false};
+   }else if(options.forceMerge&&typeof params.cursor==='string'&&!params.cursor.startsWith('ocsh1.')){
+    // The renderer kept a cursor from the live engine; the cached snapshot restarts from its head
+    // so the conversation still opens offline instead of failing with a stale-cursor error.
+    position=null;
    }else position=this.decodeCursor(params.cursor,scope);
   }
   const view=params.itemsView??'summary';

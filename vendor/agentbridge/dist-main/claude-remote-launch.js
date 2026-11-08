@@ -12,7 +12,10 @@ function remoteBootstrapCommand(platform, nodeExecutable = 'node') {
     const loader = "let b=Buffer.alloc(0);function load(c){b=Buffer.concat([b,c]);const n=b.indexOf(10);if(n<0){if(b.length>65536)process.exit(1);return;}process.stdin.pause();process.stdin.removeListener('data',load);const rest=b.subarray(n+1);if(rest.length)process.stdin.unshift(rest);eval(Buffer.from(b.subarray(0,n).toString('ascii'),'base64').toString('utf8'));process.stdin.resume();}process.stdin.on('data',load);";
     return (0, app_server_rpc_1.appServerCommand)(platform, nodeExecutable, ['-e', loader]);
 }
+const remoteInitCache = new WeakMap();
 async function launchRemoteClaude(conn, input) {
+    const cacheKey = `${input.executable || ''}|${input.remoteCwd || ''}|${input.configDir || ''}|${input.authMode}|${input.api?.baseUrl || ''}|${input.api?.model || ''}|${Boolean(input.api?.apiKey)}`;
+    const cachedInit = remoteInitCache.get(conn)?.get(cacheKey);
     const channel = await new Promise((resolve, reject) => conn.exec(remoteBootstrapCommand(input.platform, input.nodeExecutable), { pty: false }, (error, stream) => error ? reject(error) : resolve(stream)));
     const transport = new node_events_1.EventEmitter();
     transport.on("error", () => { });
@@ -67,8 +70,16 @@ async function launchRemoteClaude(conn, input) {
         });
         // Credentials are absent from command arguments and files: send private launch material only through encrypted stdin.
         channel.write(Buffer.from(claude_remote_bootstrap_1.claudeRemoteBootstrap).toString('base64') + '\n');
-        channel.write(JSON.stringify({ executable: input.executable, remoteCwd: input.remoteCwd, configDir: input.configDir, args: input.args, authMode: input.authMode, api: input.api, mcpToken: input.mcpToken, autoCompactPercent: input.autoCompactPercent }) + '\n');
+        channel.write(JSON.stringify({ executable: input.executable, remoteCwd: input.remoteCwd, configDir: input.configDir, args: input.args, authMode: input.authMode, api: input.api, mcpToken: input.mcpToken, autoCompactPercent: input.autoCompactPercent, ...(cachedInit ? { cachedInit } : {}) }) + '\n');
     });
+    if (meta.version && meta.auth && meta.cachedEnv) {
+        let map = remoteInitCache.get(conn);
+        if (!map) {
+            map = new Map();
+            remoteInitCache.set(conn, map);
+        }
+        map.set(cacheKey, { version: String(meta.version), auth: meta.auth, environment: meta.cachedEnv });
+    }
     // Hold initialization trailing bytes until the protocol has installed its listeners.
     setImmediate(() => { if (buffer)
         transport.emit('data', Buffer.from(buffer)); });

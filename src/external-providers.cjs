@@ -58,7 +58,7 @@ class GrokCLI{
   if(m.method&&m.id!=null){
    // No terminal/filesystem callbacks are advertised. Mac MCP owns its approval gate.
    if(m.method==='session/request_permission'){
-    const name=m.params?.toolCall?.title||'',mac=/^(?:mcp__agentbridge_mac__|agentbridge_mac[.:/])/.test(name);
+    const name=m.params?.toolCall?.title||'',mac=/^(?:mcp__opencodex_mac__|opencodex_mac[.:/])/.test(name);
     const option=mac&&this.busy&&m.params.options?.find(o=>o.kind==='allow_once');
     this.sendJSON({jsonrpc:'2.0',id:m.id,result:{outcome:option?{outcome:'selected',optionId:option.optionId}:{outcome:'cancelled'}}});
    }else this.sendJSON({jsonrpc:'2.0',id:m.id,error:{code:-32601,message:'Only the authenticated Mac MCP tool channel is available.'}});
@@ -79,7 +79,7 @@ class GrokCLI{
   this.emit({type:'status'});return this.status();
  }
  async refreshQuota(){this.emit({type:'status'});return this.snapshot.quota;}
- servers(){return [{type:'http',name:'agentbridge_mac',url:this.mcp.url,headers:[{name:'Authorization',value:'Bearer '+this.mcp.token}]}];}
+ servers(){return [{type:'http',name:'opencodex_mac',url:this.mcp.url,headers:[{name:'Authorization',value:'Bearer '+this.mcp.token}]}];}
  async send(p){
   if(this.busy)throw Error('Grok 正在工作。');if(!this.snapshot.account.authenticated)throw Error('Grok CLI 尚未登入。');if(p.forkSession)throw Error('Grok 分支尚未支援，請建立新對話。');
   this.busy=true;this.activeRequestId=p.requestId;this.text='';this.tools=new Map();this.cancelled=false;
@@ -98,7 +98,7 @@ class GrokCLI{
   if(p.effort)await this.call('session/set_config_option',{sessionId:this.sessionId,configId:'reasoning_effort',value:p.effort});
   const prompt=(p.content||[{type:'text',text:p.prompt}]).map(c=>c.type==='image'?{type:'image',data:c.source.data,mimeType:c.source.media_type}:c);
   if(p.systemPrompt)prompt.unshift({type:'text',text:p.systemPrompt});
-  prompt.unshift({type:'text',text:'所有工作檔案與工具都在使用者 Mac。請只使用 agentbridge_mac MCP 工具。Mac 工作目錄：'+this.options.cwd});
+  prompt.unshift({type:'text',text:'你在 OpenCodex 中工作；OpenCodex 是獨立 App，不要叫使用者開啟或重新連接其他 App。所有工作檔案與工具都在使用者 Mac，請只使用 opencodex_mac MCP 工具；這台 Mac 的技能、記憶與過去對話可用 mac_skill_search、mac_skill_view、mac_memory_read、mac_memory_write、mac_session_search 取得。Mac 工作目錄：'+this.options.cwd});
   if(this.cancelled)return this.finish('cancelled');
   const result=await this.call('session/prompt',{sessionId:this.sessionId,prompt},30*60*1000);
   this.finish(this.cancelled||result.stopReason==='cancelled'?'cancelled':result.stopReason==='end_turn'?'completed':'error',result.stopReason==='end_turn'?undefined:result.stopReason);
@@ -125,8 +125,8 @@ try:
  d=os.path.join(root,".agents");os.mkdir(d,0o700)
  guard=os.path.join(root,"guard.py")
  with open(guard,"w") as f:
-  f.write('import sys,json\ntry:\n p=json.load(sys.stdin); n=p.get("toolCall",{}).get("name",""); ok=n.startswith(("mcp__agentbridge_mac__","mcp_agentbridge_mac_","agentbridge_mac."))\nexcept Exception: ok=False\nprint(json.dumps({"decision":"auto_approve" if ok else "deny","reason":"OpenCodex only permits the authenticated Mac MCP channel."}))\n')
- for name,data in [("hooks.json",{"opencodex-mac-only":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"python3 "+guard,"timeout":10}]}]}}),("mcp_config.json",{"mcpServers":{"agentbridge_mac":{"serverUrl":p["mcp"]["url"],"headers":{"Authorization":"Bearer "+p["mcp"]["token"]}}}})]:
+  f.write('import sys,json\ntry:\n p=json.load(sys.stdin); n=p.get("toolCall",{}).get("name",""); ok=n.startswith(("mcp__opencodex_mac__","mcp_opencodex_mac_","opencodex_mac."))\nexcept Exception: ok=False\nprint(json.dumps({"decision":"auto_approve" if ok else "deny","reason":"OpenCodex only permits the authenticated Mac MCP channel."}))\n')
+ for name,data in [("hooks.json",{"opencodex-mac-only":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"python3 "+guard,"timeout":10}]}]}}),("mcp_config.json",{"mcpServers":{"opencodex_mac":{"serverUrl":p["mcp"]["url"],"headers":{"Authorization":"Bearer "+p["mcp"]["token"]}}}})]:
   target=os.path.join(d,name)
   with open(target,"w") as f: json.dump(data,f)
   os.chmod(target,0o600)
@@ -191,7 +191,7 @@ class AntigravityCLI{
   }});
   this.stream.stderr?.on('data',()=>{});this.stream.on('error',e=>this.finish('error',e.message));
   this.stream.on('close',()=>{if(!result)this.finish(this.cancelled?'cancelled':'error','Antigravity 未回傳完成結果。');});
-  const prompt=[p.systemPrompt,'只使用 agentbridge_mac MCP 工具處理使用者 Mac 的檔案。工作目錄：'+this.options.cwd,p.prompt].filter(Boolean).join('\n\n');
+  const prompt=[p.systemPrompt,'你在 OpenCodex 中工作；OpenCodex 是獨立 App，不要叫使用者開啟或重新連接其他 App。只使用 opencodex_mac MCP 工具處理使用者 Mac 的檔案；這台 Mac 的技能、記憶與過去對話可用 mac_skill_search、mac_skill_view、mac_memory_read、mac_memory_write、mac_session_search 取得。工作目錄：'+this.options.cwd,p.prompt].filter(Boolean).join('\n\n');
   this.stream.end(JSON.stringify({mcp:this.mcp,model:p.model,effort:p.effort,conversationId:p.conversationId,prompt})+'\n');
   if(this.cancelled)this.stream.signal?.('INT');
  }

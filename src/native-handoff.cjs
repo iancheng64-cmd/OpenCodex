@@ -117,13 +117,14 @@ class NativeHandoff{
   return next;
  }
  claudeTurnIds(threadId){return new Set((this.claude.entries[threadId]?.thread.turns||[]).map(t=>t.id));}
- running(threadId){return this.claude.runtime?.run?.threadId===threadId||this.claude.preparing?.threadId===threadId;}
+ running(threadId){return Boolean(this.claude.running?.(threadId)||this.claude.runtime?.run?.threadId===threadId||this.claude.preparing?.threadId===threadId);}
  async start(params,{cwd}){
   if(!this.connected)throw Error('請先連線並登入 '+this.label+'，再切換模型。');
-  if(this.busy)throw Error(this.label+' 目前正在工作，請等待此回合結束。');
+  const blocked=()=>this.running(params.threadId)||(this.busy&&!this.claude.canRunConcurrently?.(params.threadId));
+  if(blocked())throw Error(this.label+' 目前正在工作，請等待此回合結束。');
   const threadId=params.threadId,model=params.model.slice(this.prefix.length),record=this.record(threadId);
   try{await this.flush(threadId);}catch(cause){throw new Error('上一個 '+this.label+' 回合尚未寫回對話，請稍後重試。',{cause});}
-  if(this.busy)throw Error(this.label+' 目前正在工作，請等待此回合結束。');
+  if(blocked())throw Error(this.label+' 目前正在工作，請等待此回合結束。');
   const local=this.claudeTurnIds(threadId),codex=await this.readThread(threadId);
   const turns=(codex.thread?.turns||[]).filter(t=>!local.has(t.id));
   const fresh=turns.filter(t=>t.status!=='inProgress'&&!record.synced.includes(t.id));

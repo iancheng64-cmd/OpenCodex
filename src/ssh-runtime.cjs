@@ -28,6 +28,10 @@ module.exports=function({root,abRoot,emit,onNativeRequest,agentTools}){
  const composio=new (require('./composio.cjs').ComposioConnection)({root,codec,auth:mod('mac-mcp-auth.js'),Client:mod('mac-extension-servers.js').MacExtensionClient,open:url=>require('electron').shell.openExternal(url),onChange:()=>emit('opencodex:composio',composio.state())});
  const provider=new (mod('computer-provider.js').ComputerProviderStore)(path.join(root,'computer-provider.json'),path.join(process.resourcesPath,'agentbridge/computer-use/claudex-computer-use'),os.homedir());
  const extensionHome=process.env.OPENCODEX_EXTENSION_HOME||path.join(os.homedir(),'.codex');
+ const agentWorkspace=require('./agent-environment.cjs');
+ const environment=new agentWorkspace.AgentEnvironment({appRoot:root,codexHome:process.env.CODEX_HOME});
+ agentWorkspace.installCoreTools(mod('agent-core-tools.js').AgentCoreTools,environment);
+ const goalGuard=new (require('./native-goal-guard.cjs').GoalGuard)({file:path.join(root,'native-goal-holds.json'),audit:(type,data)=>emit('opencodex:goal',{type,...data})});
  const {NativeTools}=require('./native-tools.cjs');
  const nativeBinary=path.join(process.resourcesPath,'opencodex-permission-engine');
  const {routeNativeRequest}=require('./native-request.cjs');
@@ -38,7 +42,8 @@ module.exports=function({root,abRoot,emit,onNativeRequest,agentTools}){
   if(permission&&!custom)throw Error('權限工作階段與所選模式不一致。');
   const options={binary:nativeBinary,cwd,env:{...process.env},config:{'features.hooks':false},AppServerRpc:mod('app-server-rpc.js').AppServerRpc,getApp:()=>require('./native-app-context.cjs').scopedApp(next.runtime),getRun:()=>require('./native-run-context.cjs').scopedRun(next.runtime)||next.runtime?.run,onRequest:(message,rpc,owner)=>{
    const run=owner.getRun?.();
-   if(run?.parentThreadId&&!next.runtime?.openCodexSubagents?.isActive(run))return false;
+   const activeSubagents=next.runtime?.openCodexSubagentsByThread?.get(run?.parentThreadId||run?.threadId)||next.runtime?.openCodexSubagents;
+   if(run?.parentThreadId&&!activeSubagents?.isActive(run))return false;
    const routed=routeNativeRequest(message,owner.threadId,run);
    return routed?onNativeRequest?.(routed,rpc,{run,owner:next.runtime}):false;
   }};
@@ -59,8 +64,15 @@ module.exports=function({root,abRoot,emit,onNativeRequest,agentTools}){
  const permissions=new (require('./native-permissions-runtime.cjs').NativePermissionRuntime)({service:permissionService,owners,closeHooks:runtime=>hooks.closeRuntime(runtime)});
  async function selectWorkspace(runtime,cwd,mode=runtime.permissionMode){
   if(runtime.openCodexWorkspaceTransition)throw Error('專案或權限正在更新，請稍候。');
-  if(runtime.localCwd===cwd&&runtime.permissionMode===mode&&!runtime.openCodexWorkspaceFailed&&(!runtime.openCodexExtensionsDirty||runtime.run))return;
-  if(runtime.run||runtime.closed)throw Error('請先停止工作，再切換專案或權限。');
+  const busy=Boolean(runtime.run||runtime.runs?.size);
+  if(runtime.localCwd===cwd&&runtime.permissionMode===mode&&!runtime.openCodexWorkspaceFailed&&(!runtime.openCodexExtensionsDirty||busy))return;
+  if(busy&&!runtime.closed&&!runtime.openCodexWorkspaceFailed&&runtime.permissionMode===mode){
+   if(Array.isArray(runtime.toolHost?.roots)&&!runtime.toolHost.roots.includes(cwd))runtime.toolHost.roots.push(cwd);
+   if(runtime.toolHost?.core?.config)runtime.toolHost.core.config.cwd=cwd;
+   runtime.localCwd=cwd;
+   return;
+  }
+  if(busy||runtime.closed)throw Error('請先停止工作，再切換專案或權限。');
   if(mode.startsWith('custom:'))permissions.capable(runtime);
   const operation={},extensionsRevision=runtime.openCodexExtensionsDirty;runtime.openCodexWorkspaceTransition=operation;
   runtime.openCodexWorkspaceFailed=true;let specs;
@@ -84,6 +96,8 @@ module.exports=function({root,abRoot,emit,onNativeRequest,agentTools}){
  }
  const deps={
   stateDirectory:path.join(root,'agent-task-checkpoints'),connectConfig,emit,window:()=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().startsWith('app://')),
+  goalGuard,
+  agentInstructions:runtime=>{const status=runtime.toolHost?.status()||{};return agentWorkspace.runtimeInstructions({environment,cwd:runtime.localCwd,tools:status.tools||[],extensions:status.extensions||[]});},
   extensions:async(cwd,runtime)=>{
    const catalog=await extensionTiming('disk-catalogue',()=>mod('extensions.js').localExtensions({cwd,agent:'codex'})),discovery=await extensionTiming('configured-servers',()=>discover({cwd}));
    for(const s of discovery.statuses){const item=catalog.items.find(i=>i.id===s.id);if(item){item.status=s.status;item.enabled=s.status!=='disabled';}}
@@ -127,8 +141,15 @@ module.exports=function({root,abRoot,emit,onNativeRequest,agentTools}){
  const claudeBackend=mod('claude-local-backend.js');claudeBackend.registerClaudeLocalBackend(deps);
  mod('agent-orchestrator.js').registerAgentOrchestrator({emit});
  return {composio,runtimeDependencies:deps,claudeBackend,selectClaudeWorkspace:async(runtime,cwd)=>{
-   if(runtime.cwd===cwd&&!runtime.openCodexWorkspaceFailed&&(!runtime.openCodexExtensionsDirty||runtime.run||runtime.cli.busy))return;
-   if(runtime.run||runtime.cli.busy||runtime.closed)throw Error('請先停止工作，再切換專案。');
+   const busy=Boolean(runtime.run||runtime.cli.busy||runtime.peerBusyCount>0);
+   if(runtime.cwd===cwd&&!runtime.openCodexWorkspaceFailed&&(!runtime.openCodexExtensionsDirty||busy))return;
+   if(busy&&!runtime.closed&&!runtime.openCodexWorkspaceFailed){
+    if(Array.isArray(runtime.host?.roots)&&!runtime.host.roots.includes(cwd))runtime.host.roots.push(cwd);
+    if(runtime.host?.core?.config)runtime.host.core.config.cwd=cwd;
+    runtime.cwd=cwd;runtime.localCwd=cwd;runtime.cli.options.cwd=cwd;
+    return;
+   }
+   if(busy||runtime.closed)throw Error('請先停止工作，再切換專案。');
    const previous=owners.owner(runtime),extensionsRevision=runtime.openCodexExtensionsDirty;let specs;runtime.openCodexWorkspaceFailed=true;
    try{specs=await deps.extensionServers(cwd);if(runtime.closed)throw Error('Claude 連線已中斷。');await runtime.host.setWorkspace(cwd,specs);runtime.cwd=cwd;runtime.localCwd=cwd;runtime.cli.options.cwd=cwd;runtime.cli.permissionChanged=true;owners.bind(runtime,specs);previous?.close();runtime.openCodexWorkspaceFailed=false;if(runtime.openCodexExtensionsDirty===extensionsRevision)delete runtime.openCodexExtensionsDirty;}
    catch(e){specs?.openCodexNativeOwner?.close();throw e;}

@@ -16,7 +16,13 @@ async function ownedPage(rpc,method,params,known,profile){
   const query={...params,cursor:cursor||null};delete query.cwd;
   result=await rpc.request(method,query);
   if(!Array.isArray(result.data))throw Error('遠端回傳無效對話清單。');
-  const localRows=result.data.filter(item=>known[ownerId(item)]?.profile===profile&&!known[ownerId(item)].deleted).map(item=>{
+  const localRows=result.data.filter(item=>{
+   const entry=known[ownerId(item)];
+   if(entry?.profile!==profile||entry.deleted)return false;
+   const t=typeof item==='object'&&item?(item.thread||item):null;
+   if(t&&['thread/list','thread/search'].includes(method)&&entry.emptyHistory===true&&!t.name&&!t.preview&&!(Array.isArray(t.turns)&&t.turns.length))return false;
+   return true;
+  }).map(item=>{
    if(typeof item==='string')return item;
    const cwd=known[ownerId(item)]?.localCwd;
    return cwd?(item.thread?{...item,thread:{...item.thread,cwd}}:{...item,cwd}):item;
@@ -31,8 +37,11 @@ async function ownedPage(rpc,method,params,known,profile){
  // The remote backwards cursor can anchor an unrelated owner's row.
  return {...result,data,backwardsCursor:null,nextCursor:cursor||null};
 }
-function cachedPage(method,params,known,profile){
- let data=Object.values(known).filter(t=>t.profile===profile&&t.summary&&!t.deleted).map(t=>({...t.summary,archived:!!t.archived}));
+// scope: 'own' = this host; 'others' = conversations cached from every other host, which open from
+// the cache until that host is connected again; 'all' = both.
+function cachedPage(method,params,known,profile,{scope='own'}={}){
+ const mine=t=>t.profile===profile,shown=t=>t.summary&&!t.deleted&&!(t.emptyHistory===true&&!t.summary.name&&!t.summary.preview);
+ let data=Object.values(known).filter(t=>shown(t)&&(scope==='all'||(scope==='others'?!mine(t):mine(t)))).map(t=>({...t.summary,archived:!!t.archived}));
  data=data.filter(t=>t.archived===!!params?.archived);
  if(params?.cwd)data=data.filter(t=>t.cwd===params.cwd||Array.isArray(params.cwd)&&params.cwd.includes(t.cwd));
  const term=(params?.searchTerm||'').toLocaleLowerCase();
@@ -44,6 +53,12 @@ function cachedPage(method,params,known,profile){
  data=data.slice(offset,offset+limit);
  if(method==='thread/search')data=data.map(thread=>({thread,snippet:thread.preview||thread.name||''}));
  return {data,backwardsCursor:null,nextCursor};
+}
+// Every cached row for one query, for merging into a live page.
+function cachedAll(method,params,known,profile,options){
+ const rows=[];let cursor=null;
+ for(let page=0;page<20;page++){const result=cachedPage(method,{...params,cursor,limit:100},known,profile,options);rows.push(...result.data);cursor=result.nextCursor;if(!cursor)break;}
+ return rows;
 }
 
 const {randomUUID}=require('node:crypto');
@@ -107,4 +122,4 @@ class NativeEventStreams {
  }
 }
 
-module.exports={collections,reads,threadScoped,ownedPage,cachedPage,NativeEventStreams};
+module.exports={collections,reads,threadScoped,ownedPage,cachedPage,cachedAll,NativeEventStreams};

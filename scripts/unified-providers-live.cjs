@@ -30,7 +30,7 @@ const {rpc,wait,cdp}=require('./qa-client.cjs');
   const history=(await r.call('thread/read',{threadId,includeTurns:true})).thread.turns;
   report.checks.historyOrdered=history.length===3&&history.map(t=>t.id).join()===report.steps.map(s=>s.id).join();assert(report.checks.historyOrdered);
   fs.writeFileSync(fixture,secret,{mode:0o600});
-  const fourth=await send(grok.model,'使用 agentbridge_mac MCP 讀取使用者 Mac 這個檔案：'+fixture+'。只回覆檔案中的代碼。必須實際使用工具。');
+  const fourth=await send(grok.model,'使用 opencodex_mac MCP 讀取使用者 Mac 這個檔案：'+fixture+'。只回覆檔案中的代碼。必須實際使用工具。');
   report.checks.grokMacTool=fourth.includes(secret);assert(report.checks.grokMacTool);
   // Save the queue's selection, then change the composer again before dispatch.
   const queuedMarker='QUEUED-'+crypto.randomBytes(4).toString('hex'),eventOffset=r.events.length;

@@ -11,7 +11,7 @@ def package_lock(build):
 
 def sealed_identity(app):
  subprocess.run(['codesign','--verify','--deep','--strict',str(app)],check=True,capture_output=True)
- names=['Contents/Info.plist','Contents/_CodeSignature/CodeResources','Contents/MacOS/ChatGPT','Contents/MacOS/OpenCodex']
+ names=['Contents/Info.plist','Contents/_CodeSignature/CodeResources','Contents/MacOS/OpenCodexEngine','Contents/MacOS/OpenCodex']
  result=[]
  for name in names:
   with (app/name).open('rb') as stream: result.append(hashlib.file_digest(stream,'sha256').hexdigest())

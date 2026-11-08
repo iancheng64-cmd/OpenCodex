@@ -22,9 +22,10 @@ function fixture(){
  c.bridge={claudeBackend:{openCodexClaudeRuntimes:new Map([['r',{id:'r',closed:false}]])}};
  c.handlers=new Map([['profiles:list',async()=>c.profiles],['runtime:connect',async(_,params)=>{c.calls.push(params);return {runtimeId:'r'};}],['claude:connect',async(_,params)=>{c.calls.push(params);return {runtimeId:'r'};}],['runtime:disconnect',async()=>{}]]);
  c.audit=(type,data)=>c.events.push({type,...data});c.app={whenReady:()=>Promise.resolve()};
+ c.anyRun=()=>false;c.closeWorkers=async()=>{};c.maintainSessions=()=>{};c.lastConnectionParams=null;c.sessions={workers:new Set(),live:()=>[],forget(){}};
  c.connectionIntent=0;c.nativeConfigMutations={settled:async()=>{}};c.setTimeout=fn=>fn();
  c.quotaMonitor={reset(){}};c.claude.disconnect=async()=>{c.claude.connected=false;};
- c.external={closeAll:async()=>{}};c.connectProviders=async()=>{};c.restorePeer=async()=>{};c.refreshQuotas=async()=>{};
+ c.noPeers=false;c.external={closeAll:async()=>{}};c.connectProviders=async()=>{};c.restorePeer=async()=>{};c.refreshQuotas=async()=>{};
  c.handle=(name,fn)=>c.handlers.set(name,fn);
  c.setImmediate=fn=>c.jobs.push(fn);
  vm.createContext(c);vm.runInContext(connect,c);

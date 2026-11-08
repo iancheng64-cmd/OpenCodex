@@ -38,12 +38,13 @@ try{
  }
  assert.throws(()=>engineTransition({mode:'official'},{engine:'unknown'}),/Agent/);
  tests.push('engine switches keep the connected host, restore official/custom/SSH routing and full access without mutating input');
- const {discussionDeadline,discussionTransportDeadline}=require('./runtime-patches.cjs');
+ const {discussionDeadline,discussionTransportDeadline,autoCompactWindow}=require('./runtime-patches.cjs');
  const host=fs.readFileSync(path.join(__dirname,'../vendor/agentbridge/dist-main/local-tool-host.js'),'utf8');
  const patched=discussionDeadline(host);assert.equal(discussionDeadline(patched),patched);
  assert.match(patched,/opencodex-native:agents/);new (require('node:vm').Script)(patched);
  const policy=fs.readFileSync(path.join(__dirname,'../vendor/agentbridge/dist-main/runtime-policy.js'),'utf8');
  const transport=discussionTransportDeadline(policy);assert.equal(discussionTransportDeadline(transport),transport);new (require('node:vm').Script)(transport);
+ const compact=autoCompactWindow(transport);assert.equal(autoCompactWindow(compact),compact);assert.ok(!compact.includes('128000'));new (require('node:vm').Script)(compact);
  tests.push('discussion deadlines patch the actual vendor sources and are syntactically valid and idempotent');
  const report={at:new Date().toISOString(),passed:true,tests};fs.writeFileSync(path.join(__dirname,'../evidence/native-profile-unit.json'),JSON.stringify(report,null,2)+'\n');console.log(JSON.stringify(report));
 }finally{fs.rmSync(root,{recursive:true,force:true});}

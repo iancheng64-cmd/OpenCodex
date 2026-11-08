@@ -79,17 +79,19 @@
     const summary=make('summary','oc-provider-summary'),heading=make('div','oc-row');
     const available=q.status==='connected'||q.status==='ready'||q.account?.authenticated===true;
     heading.append(make('strong','',q.label),make('span','oc-provider-status',q.status==='auth-blocked'?'鑰匙圈需授權':q.status==='auth-unverified'?'登入狀態待確認':q.status==='auth-required'?'登入待確認':q.status==='disconnected'?'未連線':q.error?'查看狀態':available?'已連線':'用量詳情'));
-    const compact=make('div','oc-compact-windows'),windows=(q.quota?.buckets||[]).flatMap(bucket=>['primary','secondary'].flatMap(kind=>bucket[kind]?[{...bucket[kind],bucket:bucket.name,kind}]:[]));
+    const compact=make('div','oc-compact-windows'),windows=(q.quota?.buckets||[]).flatMap((bucket,index)=>['primary','secondary'].flatMap(kind=>bucket[kind]?[{...bucket[kind],bucket:bucket.name,bucketIndex:index,kind}]:[]));
     if(['codex','claude'].includes(q.id)){
-     for(const [mins,label] of [[300,'5 小時'],[10080,'每週']]){
-      const w=windows.find(w=>w.windowDurationMins===mins);compact.append(make('span','',label+' '+(typeof w?.remainingPercent==='number'?Math.round(w.remainingPercent*10)/10+'%':'未提供')));
-     }
+     // Show only the account-wide windows the provider reports; model-scoped allowances are listed in the details.
+     const main=windows.filter(w=>q.id==='claude'?!w.model:w.bucketIndex===0).sort((a,b)=>(a.windowDurationMins??1e9)-(b.windowDurationMins??1e9));
+     for(const w of main.slice(0,2))compact.append(make('span','',period(w.windowDurationMins,w.kind)+' '+(typeof w.remainingPercent==='number'?Math.round(w.remainingPercent*10)/10+'%':'未提供')));
+     if(!main.length)compact.append(make('span','',q.status==='disconnected'?'未連線':q.status==='loading'?'讀取中…':'尚未取得額度'));
+     if(windows.length>main.length)compact.append(make('span','','＋'+(windows.length-main.length)+' 項模型額度'));
     }else if(windows.length){
      compact.append(make('span','',windows.length+' 項模型額度 · 展開查看'));
     }else compact.append(make('span','',q.status?.startsWith('auth-')?'確認登入後同步模型與額度':'CLI 未提供剩餘額度'));
     summary.append(heading,compact);card.append(summary,make('div','oc-muted oc-account',q.account?.email||q.account?.authMethod||q.source||'尚未連線'));
     for(const bucket of q.quota?.buckets||[]){
-     if(bucket.name)card.append(make('strong','oc-bucket',bucket.name));
+     if(bucket.name&&!(bucket.primary&&!bucket.secondary&&bucket.primary.name===bucket.name))card.append(make('strong','oc-bucket',bucket.name));
      for(const kind of ['primary','secondary']){
       const w=bucket[kind];if(!w)continue;
       const row=make('div','oc-row oc-window'),n=w.remainingPercent,label=w.name||period(w.windowDurationMins,kind);
@@ -98,10 +100,7 @@
       if(w.resetsAt!=null)card.append(make('div','oc-muted','重置 '+when(typeof w.resetsAt==='number'?w.resetsAt*1000:w.resetsAt)));
      }
     }
-    if(['codex','claude'].includes(q.id))for(const [minutes,label] of [[300,'5 小時'],[10080,'每週']]){
-     const present=(q.quota?.buckets||[]).some(b=>[b.primary,b.secondary].some(w=>w&&w.windowDurationMins===minutes));
-     if(!present){const row=make('div','oc-row oc-window');row.append(make('span','',label),make('span','','未提供'));card.append(row);}
-    }
+    if(['codex','claude'].includes(q.id)&&windows.length&&!windows.some(w=>w.windowDurationMins===300))card.append(make('div','oc-muted','供應商目前未回報 5 小時額度視窗，只顯示上列實際回報的額度。'));
     if(q.quota?.raw)card.append(make('pre','oc-usage-raw',q.quota.raw));
     if(q.status==='auth-required'){
      card.append(make('div','oc-warning','登入待確認：在伺服器以相同 SSH 使用者執行 '+q.login));

@@ -22,10 +22,10 @@ class ClaudeDriver{
   const endpoint=this.tools.endpoint;
   this.cli=new ClaudeLocalRuntime({cwd:this.cwd,executable:this.connection.executable,authMode:this.connection.authMode==='api'?'api':'official',api:this.connection.api,permissionMode:this.permissionMode,autoCompactPercent:70,additionalDirectories:[],
    remote:{launch:(args,options)=>launchRemoteClaude(conn,{platform,nodeExecutable:this.connection.nodeExecutable,executable:this.connection.executable,remoteCwd:this.connection.remoteCwd,configDir:this.connection.configDir,args,...options})},
-   mcp:{url:endpoint.remoteUrl,token:endpoint.token,name:'agentbridge_mac'},
+   mcp:{url:endpoint.remoteUrl,token:endpoint.token,name:'opencodex_mac'},
    onPermission:request=>{
     // Mac MCP calls are approved once at the tool host; anything else is denied for the split route.
-    if(request.toolName.startsWith('mcp__agentbridge_mac__'))return Promise.resolve({allow:!!this.cli?.busy&&!request.signal.aborted});
+    if(request.toolName.startsWith('mcp__opencodex_mac__'))return Promise.resolve({allow:!!this.cli?.busy&&!request.signal.aborted});
     return Promise.resolve({allow:false});
    },
    onEvent:event=>{
@@ -36,7 +36,7 @@ class ClaudeDriver{
   try{
    await this.cli.start();
    const catalog=await this.cli.extensions();
-   if(catalog.mcp.some(s=>s.name!=='agentbridge_mac'))throw Error('Claude 載入了非 Mac 工具，已停止這次連線。');
+   if(catalog.mcp.some(s=>s.name!=='opencodex_mac'))throw Error('Claude 載入了非 Mac 工具，已停止這次連線。');
   }catch(e){await this.stop();throw e;}
   this.hostName=profile.name;
   return this.status();

@@ -4,7 +4,7 @@ root=Path(__file__).resolve().parent.parent
 with tempfile.TemporaryDirectory(prefix='opencodex-launcher-test-') as directory:
  base=Path(directory); app=base/'app'; app.mkdir(); home=base/'home'; home.mkdir()
  settings=home/'Library/Application Support/OpenCodex/opencodex.json'; settings.parent.mkdir(parents=True)
- launcher=app/'OpenCodex'; engine=app/'ChatGPT'
+ launcher=app/'OpenCodex'; engine=app/'OpenCodexEngine'
  subprocess.run(['clang','-Werror','-O2','-x','objective-c','-framework','Foundation',str(root/'src/launcher.c'),'-o',str(launcher)],check=True)
  engine.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@"\n'); engine.chmod(0o700)
  tests=[]

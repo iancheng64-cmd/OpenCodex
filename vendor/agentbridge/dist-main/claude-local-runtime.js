@@ -55,7 +55,7 @@ async function probeClaudeAuth(executable, authLaunch, cwd = process.cwd()) {
 function claudeArguments(options, sessionId) {
     const mode = options.permissionMode === "full" ? "bypassPermissions" : options.permissionMode === "project" ? "acceptEdits" : "default";
     const args = ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages", "--permission-prompt-tool", "stdio", "--permission-mode", mode,
-        "--append-system-prompt", options.remote ? "Your native Claude Code Runtime and account run on the friend Runtime host. ALL user work files, shell commands, app interactions and browser operations must execute on the user Mac through agentbridge_mac tools. Mac working directory: " + options.cwd + ". For commands automatically use mac_shell_execute; for files use mac_fs tools; for UI/browser use the matching Mac tools. Never execute a work command or edit a work file on the Runtime host. Choose tools automatically without requiring users to name MCP. Native Skills and slash commands from the Runtime may provide instructions; apply those instructions using the Mac tools. Native host hooks and non-Mac MCP servers are intentionally disabled for this split route." : "You are running inside AgentBridge Studio on the user's Mac. Native Bash, Read, Edit and Write tools execute on this Mac. For requests to inspect or operate apps, windows or browsers, use the connected agentbridge_mac MCP tools automatically; users do not need to name MCP tools. Read the tool's app state before interacting, verify the resulting state, prefer AX elements, and use delivery=direct only when foreground interaction is authorized. Never substitute a remote Windows shell. Preserve the user's native Claude skills, plugins and configured MCP integrations."];
+        "--append-system-prompt", options.remote ? "Your native Claude Code Runtime and account run on the friend Runtime host. ALL user work files, shell commands, app interactions and browser operations must execute on the user Mac through agentbridge_mac tools. Mac working directory: " + options.cwd + ". For commands automatically use mac_shell_execute; for files use mac_fs tools (mac_fs_read, mac_fs_grep, mac_fs_search, mac_fs_list, mac_fs_patch, mac_fs_write); for UI/browser use the matching Mac tools. Efficiency rules: (1) Load core Mac tools (mac_fs_read, mac_fs_grep, mac_fs_search, mac_fs_list, mac_fs_patch, mac_fs_write, mac_shell_execute, mac_task_plan) together in one ToolSearch call at the start of work. (2) Prefer direct mac_fs_read/mac_fs_grep/mac_fs_search/mac_fs_list over spawning shell commands, emit parallel tool_use blocks when inspecting multiple files, and batch related shell checks into one mac_shell_execute call instead of many sequential calls. Never execute a work command or edit a work file on the Runtime host. Choose tools automatically without requiring users to name MCP. Native Skills and slash commands from the Runtime may provide instructions; apply those instructions using the Mac tools. Native host hooks and non-Mac MCP servers are intentionally disabled for this split route." : "You are running inside AgentBridge Studio on the user's Mac. Native Bash, Read, Edit and Write tools execute on this Mac. For requests to inspect or operate apps, windows or browsers, use the connected agentbridge_mac MCP tools automatically; users do not need to name MCP tools. Read the tool's app state before interacting, verify the resulting state, prefer AX elements, and use delivery=direct only when foreground interaction is authorized. Never substitute a remote Windows shell. Preserve the user's native Claude skills, plugins and configured MCP integrations."];
     args[args.indexOf("--append-system-prompt") + 1] += "\n\n" + agent_core_tools_1.coreRuntimeInstructions;
     if (options.model && options.model !== "default") {
         if (options.model.length > 200 || /[\s\x00-\x1f]/.test(options.model))
@@ -240,13 +240,35 @@ class ClaudeLocalRuntime {
         protocol.on("closed", error => {
             if (this.protocol !== protocol)
                 return;
-            if (this.run) {
-                this.emit({ type: "error", text: error.message });
-                this.finish("error");
-            }
-            this.emit({ type: "closed", text: error.message });
-            this.stopped = true;
-            void this.closeProcess();
+            void (async () => {
+                const activeRun = this.run;
+                await this.closeProcess();
+                if (!this.stopped && !this.cancelling) {
+                    try {
+                        await this.launch(this.sessionId);
+                        if (activeRun && this.run === activeRun && !activeRun.cancelled && this.sessionId && !activeRun.retriedProcessExit && this.protocol) {
+                            activeRun.retriedProcessExit = true;
+                            this.emit({ type: "activity", text: "Claude Code 程序意外結束，已自動重新啟動並接續任務…" });
+                            this.protocol.user([{ type: "text", text: "剛才的本機程序意外中斷。請檢查目前已完成的步驟與狀態，直接從中斷處接續完成任務，不要重複已完成的步驟。" }], this.sessionId);
+                            return;
+                        }
+                        if (activeRun && this.run === activeRun) {
+                            activeRun.lastError = error.message;
+                            this.emit({ type: "error", text: error.message });
+                            this.finish("error");
+                        }
+                        return;
+                    }
+                    catch { }
+                }
+                if (activeRun && this.run === activeRun) {
+                    activeRun.lastError = error.message;
+                    this.emit({ type: "error", text: error.message });
+                    this.finish("error");
+                }
+                this.emit({ type: "closed", text: error.message });
+                this.stopped = true;
+            })();
         });
         try {
             this.initialized = await protocol.request("initialize", {}, 30_000);
@@ -273,11 +295,13 @@ class ClaudeLocalRuntime {
             const compactChanged = input.autoCompactPercent !== undefined && input.autoCompactPercent !== this.options.autoCompactPercent;
             if (compactChanged)
                 this.options.autoCompactPercent = Math.max(10, Math.min(95, Number(input.autoCompactPercent) || 70));
-            const changedOptions = compactChanged || (input.model !== undefined && input.model !== this.options.model) || (input.effort !== undefined && input.effort !== this.options.effort);
+            const normModel = (m) => (!m || m === "default") ? undefined : m;
+            const normEffort = (e) => (!e || e === "default") ? undefined : e;
+            const changedOptions = compactChanged || (input.model !== undefined && normModel(input.model) !== normModel(this.options.model)) || (input.effort !== undefined && normEffort(input.effort) !== normEffort(this.options.effort));
             if (changedSession || resumeNew || changedOptions || this.permissionChanged || this.credentialsChanged) {
                 await this.closeProcess();
-                this.options.model = input.model ?? this.options.model;
-                this.options.effort = input.effort ?? this.options.effort;
+                this.options.model = normModel(input.model ?? this.options.model);
+                this.options.effort = normEffort(input.effort ?? this.options.effort);
                 this.sessionId = input.conversationId;
                 if (run.cancelled) {
                     this.finish("cancelled");
@@ -291,7 +315,7 @@ class ClaudeLocalRuntime {
                 this.finish("cancelled");
                 return { requestId: run.requestId };
             }
-            this.emit({ type: "activity", text: "Claude Code 正在這台 Mac 處理訊息" });
+            this.emit({ type: "activity", text: this.options.remote ? "Claude Code 正在朋友主機處理訊息" : "Claude Code 正在這台 Mac 處理訊息" });
             const content = input.content ? [...input.content] : [{ type: "text", text: input.prompt }];
             if (input.systemPrompt?.trim())
                 content.unshift({ type: "text", text: `使用者自訂指令（適用於本次對話）：\n${input.systemPrompt.trim()}` });

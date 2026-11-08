@@ -30,14 +30,20 @@ function receiptFor(runtime,threadId,config){
 class NativeAgentRuns{
  constructor(runtime,deps,run,receipt){
   if(!receipt||receipt.rootThreadId!==run.threadId)throw Error('Missing verified root configuration');
-  Object.assign(this,{runtime,deps,root:run,receipt});this.pending=new Map();this.discovering=new Map();this.ended=new Set();this.closed=false;this.stopRoot=false;
+  Object.assign(this,{runtime,deps,root:run,receipt,rootLocalCwd:runtime.localCwd});this.pending=new Map();this.discovering=new Map();this.ended=new Set();this.closed=false;this.stopRoot=false;
   if(guardianRuntime.effective(runtime)==='auto_review'&&!receipt.guardian)throw Error('缺少 Guardian 對話授權。');
   if(receipt.guardian)this.guardian=new NativeGuardian({sessionId:run.threadId,server:runtime.mcp.name,current:()=>this.current(),active:active=>this.isActive(active)});
   this.registry=new NativeSubagents({runtimeId:runtime.id,profileId:runtime.snapshot.profileId,environmentId:runtime.executor.environmentId,cwd:runtime.localCwd,mcpName:runtime.mcp.name,owner:runtime.toolHost,approvalPolicy:runtime.permissionMode==='full'?'never':'untrusted',sandbox:{type:runtime.permissionMode==='full'?'dangerFullAccess':'readOnly'},workspaceRoots:[runtime.localCwd]});
   const host=runtime.toolHost;
   host.openCodexCurrentRun=()=>scopedRun(runtime);
   host.openCodexResolveRun=async(meta,signal)=>{
-   try{return await this.resolve(meta,signal);}
+   try{
+    let target=this;
+    if(runtime.openCodexSubagents!==null&&runtime.openCodexSubagentsByThread instanceof Map){
+     try{const sid=turnMetadata(meta)?.session_id;if(sid&&runtime.openCodexSubagentsByThread.has(sid))target=runtime.openCodexSubagentsByThread.get(sid);}catch{}
+    }
+    return await target.resolve(meta,signal);
+   }
    catch(error){
     // Only constant ownership errors may reach tool output; RPC errors can
     // contain remote paths or configuration and keep the host's generic error.
@@ -51,10 +57,11 @@ class NativeAgentRuns{
  current(){
   const r=this.runtime,p=this.receipt.permission;
   const policy=!r.openCodexPermissionChanging&&!r.openCodexPermissionFailed&&(!r.permissionMode?.startsWith('custom:')||
-   (p&&p.entry===r.openCodexPermissions&&p.profile===r.permissionMode.slice(7)&&p.entry.valid()&&p.host===r.toolHost&&p.endpoint===r.toolHost.server&&p.rpc===r.rpc&&p.cwd===r.localCwd&&r.openCodexPermissionReceipts?.get(this.root.threadId)===p));
+   (p&&p.entry===r.openCodexPermissions&&p.profile===r.permissionMode.slice(7)&&p.entry.valid()&&p.host===r.toolHost&&p.endpoint===r.toolHost.server&&p.rpc===r.rpc&&(p.cwd===r.localCwd||p.cwd===this.rootLocalCwd)&&r.openCodexPermissionReceipts?.get(this.root.threadId)===p));
   const guardian=this.receipt.guardian;
   const review=guardian?guardianRuntime.current(r,guardian)&&r.openCodexGuardianReceipts?.get(this.root.threadId)===guardian:guardianRuntime.effective(r)!=='auto_review';
-  return policy&&review&&!this.closed&&!this.stopRoot&&!r.closed&&!this.root.cancelled&&r.run===this.root;
+  const isRoot=r.run===this.root||(r.run!=null&&r.runs instanceof Map&&r.runs.get(this.root.threadId)===this.root);
+  return policy&&review&&!this.closed&&!this.stopRoot&&!r.closed&&!this.root.cancelled&&isRoot;
  }
  isActive(run){const record=this.registry.records.get(run?.threadId);return this.current()&&record?.run===run&&this.registry.live(record)&&record.admitted&&record.phase==='active';}
  emit(run,event){this.deps.emit('runtime:event',{runtimeId:this.runtime.id,requestId:run.requestId,threadId:run.threadId,turnId:run.turnId,...event});}
@@ -110,7 +117,8 @@ class NativeAgentRuns{
  // child as soon as it sees the parent activity, before the first tool/turn gate.
  // Verify the entire source chain and executor; this never grants a tool scope.
  async discover(threadId){
-  if(this.closed||this.runtime.closed||this.runtime.openCodexSubagents!==this)throw Error('Subagent session is no longer available');
+  const isOwner=()=>this.runtime.openCodexSubagents===this||(this.runtime.openCodexSubagents!==null&&this.runtime.openCodexSubagentsByThread instanceof Map&&this.runtime.openCodexSubagentsByThread.get(this.root.threadId)===this);
+  if(this.closed||this.runtime.closed||!isOwner())throw Error('Subagent session is no longer available');
   if(this.discovering.has(threadId))return this.discovering.get(threadId);
   const work=(async()=>{
    const {thread}=await this.runtime.rpc.request('thread/read',{threadId,includeTurns:true},10000);
@@ -124,7 +132,7 @@ class NativeAgentRuns{
     if(parent===this.root.threadId)break;
     cursor=(await this.runtime.rpc.request('thread/read',{threadId:parent,includeTurns:false},10000)).thread;
    }
-   if(thread.id===this.root.threadId||this.closed||this.runtime.closed||this.runtime.openCodexSubagents!==this)throw Error('Subagent history owner changed');
+   if(thread.id===this.root.threadId||this.closed||this.runtime.closed||!isOwner())throw Error('Subagent history owner changed');
    this.runtime.openCodexChildThread?.(thread,this.root);
    return thread;
   })();
@@ -171,7 +179,9 @@ class NativeAgentRuns{
  // A stopped turn may run exactly one native Interrupt hook. This lease never
  // restores tool admission, and dies on completion, replacement or host restart.
  interruptHookActive(lease){
-  return this.interruptHook===lease&&!this.closed&&!this.runtime.closed&&this.runtime.run===this.root&&this.runtime.openCodexSubagents===this&&this.runtime.toolHost===lease.host&&lease.host.generation===lease.generation&&Date.now()<lease.expiresAt;
+  const isRoot=this.runtime.run===this.root||(this.runtime.run!=null&&this.runtime.runs instanceof Map&&this.runtime.runs.get(this.root.threadId)===this.root);
+  const isOwner=this.runtime.openCodexSubagents===this||(this.runtime.openCodexSubagents!==null&&this.runtime.openCodexSubagentsByThread instanceof Map&&this.runtime.openCodexSubagentsByThread.get(this.root.threadId)===this);
+  return this.interruptHook===lease&&!this.closed&&!this.runtime.closed&&isRoot&&isOwner&&this.runtime.toolHost===lease.host&&lease.host.generation===lease.generation&&Date.now()<lease.expiresAt;
  }
  async resolveInterruptHook(args,meta,signal){
   const lease=this.interruptHook;
@@ -252,7 +262,7 @@ class NativeAgentRuns{
  notification(message){
   this.guardian?.notification(message);
   const p=message.params||{},turnId=p.turn?.id||p.turnId;
-  if(message.method==='turn/started'&&this.root.nativeReview&&p.threadId===this.root.threadId&&this.runtime.run===this.root&&!this.runtime.closed&&!this.reviewTurnId)this.reviewTurnId=turnId;
+  if(message.method==='turn/started'&&this.root.nativeReview&&p.threadId===this.root.threadId&&(this.runtime.run===this.root||this.runtime.runs?.get(this.root.threadId)===this.root)&&!this.runtime.closed&&!this.reviewTurnId)this.reviewTurnId=turnId;
   if(message.method==='turn/started'&&p.threadId!==this.root.threadId){
    void this.ensure(p.threadId,turnId).catch(()=>this.interruptLate(p.threadId,turnId));
   }

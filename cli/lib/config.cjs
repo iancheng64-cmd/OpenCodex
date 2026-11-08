@@ -6,6 +6,13 @@ const repoRoot=path.resolve(__dirname,'..','..');
 const appSupport=process.env.OPENCODEX_HOME||path.join(os.homedir(),'Library/Application Support/OpenCodex');
 const cliRoot=path.join(appSupport,'cli');
 const abRoot=path.join(repoRoot,'vendor/agentbridge');
+// The CLI loads the fork's raw modules; apply the same rename as the App build.
+const {rebrand}=require(path.join(repoRoot,'scripts/identity-patches.cjs'));
+const Module=require('node:module'),loadJs=Module._extensions['.js'],forkRoot=path.join(abRoot,'dist-main')+path.sep;
+Module._extensions['.js']=function(module,filename){
+ if(!filename.startsWith(forkRoot))return loadJs(module,filename);
+ module._compile(rebrand(path.basename(filename),fs.readFileSync(filename,'utf8')),filename);
+};
 function resourcesPath(){
  const candidates=[process.env.OPENCODEX_RESOURCES,'/Applications/OpenCodex.app/Contents/Resources',path.join(repoRoot,'build/OpenCodex.app/Contents/Resources')].filter(Boolean);
  for(const p of candidates)if(fs.existsSync(path.join(p,'agentbridge/codex/bin/codex')))return p;

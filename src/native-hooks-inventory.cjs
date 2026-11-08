@@ -12,7 +12,8 @@ function normalized(h){
 }
 function fingerprint(inventory){
  if(typeof inventory?.featureEnabled!=='boolean'||!Array.isArray(inventory.hooks))throw Error('Mac Hooks 清單無效。');
- const entries=inventory.hooks.map(normalized).sort((a,b)=>String(a.key).localeCompare(String(b.key)));
+ // With the feature disabled no hook runs; the helper reports none while app-server still lists configured files.
+ const entries=inventory.featureEnabled?inventory.hooks.map(normalized).sort((a,b)=>String(a.key).localeCompare(String(b.key))):[];
  return createHash('sha256').update(JSON.stringify({featureEnabled:inventory.featureEnabled,hooks:entries})).digest('hex');
 }
 function nativeInventory(list,config,cwd){

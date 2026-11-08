@@ -11,7 +11,7 @@ int main(int argc,char **argv){
  char exe[PATH_MAX],engine[PATH_MAX],profile[PATH_MAX+64];uint32_t size=sizeof exe;
  if(_NSGetExecutablePath(exe,&size)!=0)return 111;
  char *slash=strrchr(exe,'/');if(!slash)return 112;*slash=0;
- snprintf(engine,sizeof engine,"%s/ChatGPT",exe);
+ snprintf(engine,sizeof engine,"%s/OpenCodexEngine",exe);
  const char *home=getenv("HOME");if(!home)home=getpwuid(getuid())->pw_dir;
  NSString *root=[[NSString stringWithUTF8String:home] stringByAppendingPathComponent:@"Library/Application Support/OpenCodex"];
  NSData *data=[NSData dataWithContentsOfFile:[root stringByAppendingPathComponent:@"opencodex.json"]];

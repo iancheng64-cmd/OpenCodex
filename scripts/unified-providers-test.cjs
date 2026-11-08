@@ -38,8 +38,8 @@ function provider(id){
   const c=new GrokCLI({onEvent(){}}),sent=[];c.stream={write:v=>sent.push(JSON.parse(v))};c.busy=true;
   const request=title=>c.receive({id:sent.length+1,method:'session/request_permission',params:{toolCall:{title},options:[{kind:'allow_once',optionId:'once'}]}});
   request('terminal');assert.equal(sent.at(-1).result.outcome.outcome,'cancelled');
-  request('mcp__agentbridge_mac__mac_fs_read');assert.equal(sent.at(-1).result.outcome.optionId,'once');
-  c.busy=false;request('mcp__agentbridge_mac__mac_fs_read');assert.equal(sent.at(-1).result.outcome.outcome,'cancelled');
+  request('mcp__opencodex_mac__mac_fs_read');assert.equal(sent.at(-1).result.outcome.optionId,'once');
+  c.busy=false;request('mcp__opencodex_mac__mac_fs_read');assert.equal(sent.at(-1).result.outcome.outcome,'cancelled');
  });
  await test('ACP streams preserve text and finish cancellation only once',()=>{
   const events=[],c=new GrokCLI({onEvent:e=>events.push(e)});c.busy=true;c.tools=new Map();c.activeRequestId='turn';

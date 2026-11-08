@@ -22,8 +22,39 @@ const {NativeQueue}=require('../src/native-queue.cjs');
  fail=true;await assert.rejects(req('start'));assert.equal((await req('list')).data.length,1);await assert.rejects(req('start'),/可能已送出/);
  await new Promise(r=>setTimeout(r,80));assert.equal(calls.length,2);tests.push('ambiguous transport failure retains message and prevents duplicate retry');
  const ambiguous=new NativeQueue({file,context:()=>ctx,start:()=>{throw Error('must not retry')},emit:()=>{}});await assert.rejects(ambiguous.request('thread/queue/start',{threadId:'t'},'a'),/可能已送出/);ambiguous.close();tests.push('uncertain delivery guard persists across restarts');
+ const eT=q.entry('a','t');eT.inflight=null;await add('fourth','four');
+ q.pause('a','t');assert.equal(eT.paused,true);
+ fail=false;ctx.busy=id=>id==='other-thread';
+ await req('start');assert.equal(eT.paused,false);
+ assert.equal(calls.at(-1).input[0].text,'three');
+ ctx.busy=id=>id==='other-thread';
+ await req('start');
+ assert.equal(calls.at(-1).input[0].text,'four');
+ tests.push('manual resume clears pause and dispatches even when another thread is busy');
  ctx.profile='b';await assert.rejects(req('start'),/SSH/);q.close();
  fs.unlinkSync(file);fs.rmdirSync(dir);
- const report={version:'0.4.1',at:new Date().toISOString(),passed:true,tests};
+
+ // Idempotent starts: the window drives thread/queue/start while the adapter also dispatches.
+ {
+  const dir2=fs.mkdtempSync(path.join(os.tmpdir(),'opencodex-queue2-')),file2=path.join(dir2,'q.json'),starts=[],ids=[];
+  let gate=null;const ctx2={connected:true,busy:false,profile:'a',ready:()=>true};
+  const q2=new NativeQueue({file:file2,context:()=>ctx2,start:async(threadId,input,selection,clientId)=>{starts.push(input[0].text);ids.push(clientId);await new Promise(r=>{gate=r;});return {turn:{id:'turn-'+starts.length}};},emit:()=>{}});
+  const r2=(action,p={})=>q2.request('thread/queue/'+action,{threadId:'t',...p},'a');
+  const x=(await r2('add',{clientUserMessageId:'x',input:[{type:'text',text:'x'}]})).queuedSubmission;
+  await new Promise(r=>setTimeout(r,80));
+  assert.equal(starts.length,1);assert.equal(q2.starting,true);assert.equal(q2.startingFor('t'),true);assert.equal(q2.startingFor('u'),false);
+  assert.equal((await r2('list')).data.length,0,'item being sent is no longer listed');
+  const shared=r2('start',{queuedSubmissionId:x.id});
+  await assert.rejects(r2('start',{queuedSubmissionId:'other'}),/尚未結束/);
+  gate();
+  assert.equal((await shared).turn.id,'turn-1');assert.equal(starts.length,1,'shared outcome, no second send');
+  assert.deepEqual(await r2('start',{queuedSubmissionId:x.id}),{turn:{id:'turn-1'}},'recently sent item reports the same turn');
+  assert.deepEqual(await r2('delete',{queuedSubmissionId:x.id}),{deleted:true},'deleting a sent item succeeds');
+  assert.deepEqual(await r2('delete',{queuedSubmissionId:'unknown'}),{deleted:false});
+  assert.equal(starts.length,1);assert.equal(q2.starting,false);assert.deepEqual(ids,['x'],'dispatch carries the window clientUserMessageId');
+  q2.close();fs.rmSync(dir2,{recursive:true,force:true});
+  tests.push('window-driven start of a message in flight or just sent shares the outcome instead of sending twice');
+ }
+ const report={version:'0.4.15',at:new Date().toISOString(),passed:true,tests};
  fs.writeFileSync(path.join(__dirname,'../evidence/native-queue-unit.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
 })().catch(e=>{console.error(e.stack);process.exit(1)});

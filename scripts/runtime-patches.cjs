@@ -31,6 +31,14 @@ function discussionTransportDeadline(code){
  if(!code.includes(before)||code.indexOf(before)!==code.lastIndexOf(before))throw Error('Unrecognized MCP transport deadline');
  return code.replace(before,'tool_timeout_sec: 1860');
 }
+// A window guessed for every model compacted a 258k model at 35%, leaving room for only a few steps.
+function autoCompactWindow(code){
+ if(code.includes('contextWindow > 0 &&'))return code;
+ const before='    if (typeof autoCompactPercent === "number" && Number.isFinite(autoCompactPercent)) {\n        const pct = Math.max(10, Math.min(95, Math.round(autoCompactPercent)));\n        const contextWindow = Number(config?.model_context_window) || 128000;\n';
+ const after='    // Only a configured window is known here; otherwise the engine applies its per-model threshold.\n    const contextWindow = Number(config?.model_context_window);\n    if (contextWindow > 0 && typeof autoCompactPercent === "number" && Number.isFinite(autoCompactPercent)) {\n        const pct = Math.max(10, Math.min(95, Math.round(autoCompactPercent)));\n';
+ if(!code.includes(before))throw Error('Unrecognized auto-compact policy');
+ return code.replace(before,after);
+}
 // Retain the failing stage without exposing arbitrary command output or secrets.
 function initializationDiagnostics(code){
  const report=stage=>`require('../../../app.asar/opencodex/native-connection.cjs').initializationFailure("${stage}", error)`;
@@ -46,4 +54,4 @@ function initializationDiagnostics(code){
  }
  return code;
 }
-module.exports={inventoryDeadline,sharedHostTrust,discussionDeadline,discussionTransportDeadline,initializationDiagnostics};
+module.exports={inventoryDeadline,sharedHostTrust,discussionDeadline,discussionTransportDeadline,autoCompactWindow,initializationDiagnostics};

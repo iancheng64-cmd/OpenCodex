@@ -8,21 +8,34 @@ const clone=value=>JSON.parse(JSON.stringify(value)),now=()=>Math.floor(Date.now
 class NativeClaude{
  constructor({root,settings,saveSettings,invoke,emit,onState,selectWorkspace,refreshTools,forwardRequest,grants,showApproval,onError,shell}){
   Object.assign(this,{root,settings,saveSettings,invoke,emit,onState,selectWorkspace,refreshTools,forwardRequest,grants,showApproval,onError,shell});
-  this.file=path.join(root,'native-claude-threads.json');this.entries={};this.loaded=new Set();this.preparing=false;
+  this.file=path.join(root,'native-claude-threads.json');this.entries={};this.loaded=new Set();this.preparing=false;this.runs=new Map();this.runsByRequest=new Map();
   try{const data=JSON.parse(fs.readFileSync(this.file,'utf8'));if(data.version!==1||!data.entries||typeof data.entries!=='object')throw Error('Invalid Claude history');this.entries=data.entries;}catch(e){if(e.code!=='ENOENT')throw e;}
   // An interrupted application cannot prove the remote turn completed. Never replay it.
   for(const e of Object.values(this.entries))for(const t of e.thread.turns||[])if(t.status==='inProgress'){t.status='interrupted';t.error={message:'App 已中斷；這項工作未自動重送。'};e.thread.status={type:'notLoaded'};}
-  this.queue=new NativeQueue({file:path.join(root,'native-claude-queue.json'),context:()=>({profile:this.profile,connected:this.connected,busy:this.busy,ready:id=>this.loaded.has(id)&&this.owns(this.entries[id])}),start:(threadId,input)=>this.request('turn/start',{threadId,input},true),emit,onError});
+  this.queue=new NativeQueue({file:path.join(root,'native-claude-queue.json'),context:()=>({profile:this.profile,connected:this.connected,busy:this.hasPeerPool()?threadId=>this.running(threadId):this.busy,ready:id=>this.loaded.has(id)&&this.owns(this.entries[id])}),start:(threadId,input)=>this.request('turn/start',{threadId,input},true),emit,onError});
  }
  get connected(){return !!this.runtime&&!this.runtime.closed&&!this.failed;}
- get busy(){return this.preparing||!!this.runtime?.run||!!this.runtime?.cli.busy||!!this.shell?.active;}
+ get busy(){return this.preparing||!!this.runtime?.run||this.runs.size>0||!!this.runtime?.cli.busy||!!this.shell?.active;}
+ hasPeerPool(){return typeof this.runtime?.createPeerCli==='function';}
+ running(threadId){return Boolean(threadId&&(this.runs.has(threadId)||this.runtime?.run?.threadId===threadId||this.preparing?.threadId===threadId));}
+ canRunConcurrently(threadId){return !this.running(threadId)&&(!this.busy||(this.hasPeerPool()&&!this.shell?.active));}
  get profile(){return this.runtime?.network?.profileId||this.settings.profileId;}
  owns(e){return !!e&&!e.deleted&&e.profile===this.profile&&(!this.connected||e.fingerprint===this.runtime.network.hostFingerprint);}
  entry(id){const e=this.entries[id];if(!this.owns(e))throw Error('此 Claude 對話不屬於目前主機，或主機身分已變更。');return e;}
  save(){const tmp=this.file+'.'+crypto.randomUUID()+'.tmp';try{fs.writeFileSync(tmp,JSON.stringify({version:1,entries:this.entries}),{mode:0o600,flag:'wx'});fs.renameSync(tmp,this.file);}finally{try{fs.unlinkSync(tmp);}catch(e){if(e.code!=='ENOENT')throw e;}}}
  note(method,params){this.emit({method,params:clone(params)});}
  attach(runtime,snapshot){if(this.busy)throw Error('請先停止 Claude 工作。');this.runtime=runtime;this.failed=false;this.snapshot=snapshot;this.loaded.clear();runtime.localCwd=runtime.cwd;runtime.toolHost=runtime.host;this.onState();}
- state(){const r=this.runtime,s=this.connected?r.cli.status():this.snapshot;return {sshAgent:'claude',connected:this.connected,executor:this.connected&&!!r.host?.status().ok,tools:this.connected?r.host?.listTools().length||0:0,profile:r?.hostName||this.settings.profileName,profileId:this.profile,cwd:r?.cwd||this.settings.cwd,transport:r?.network?.transport||null,runtimeVersion:s?.runtimeVersion||null,permissionMode:r?.permissionMode||this.settings.permissionMode,permissionBusy:this.busy||this.queue.starting,authentication:{status:!this.connected?'disconnected':s?.account?.authProblem==='credential-unavailable'?'blocked':s?.account?.verified!==true?'unverified':s?.account?.authenticated===true?'authenticated':'required',method:s?.account?.authMethod||null},quota:{account:s?.account||null,quota:s?.quota?{...s.quota,buckets:(s.quota.windows||[]).map(w=>({name:w.name,primary:w}))}:null,source:'SSH · Claude Code',status:!this.connected?'disconnected':s?.account?.authProblem==='credential-unavailable'?'auth-blocked':s?.account?.verified!==true?'auth-unverified':s?.account?.authenticated!==true?'auth-required':s?.quota?.stale?'unavailable':s?.quota?'available':'loading',stale:!this.connected||!!s?.quota?.stale,error:s?.account?.error||s?.quota?.error||null},engine:'opencodex-claude-ssh'};}
+ state(){const r=this.runtime,s=this.connected?r.cli.status():this.snapshot,q=this.connected?this.cachedQuota(s?.quota):s?.quota;return {sshAgent:'claude',connected:this.connected,executor:this.connected&&!!r.host?.status().ok,tools:this.connected?r.host?.listTools().length||0:0,profile:r?.hostName||this.settings.profileName,profileId:this.profile,cwd:r?.cwd||this.settings.cwd,transport:r?.network?.transport||null,runtimeVersion:s?.runtimeVersion||null,permissionMode:r?.permissionMode||this.settings.permissionMode,permissionBusy:this.busy||this.queue.starting,authentication:{status:!this.connected?'disconnected':s?.account?.authProblem==='credential-unavailable'?'blocked':s?.account?.verified!==true?'unverified':s?.account?.authenticated===true?'authenticated':'required',method:s?.account?.authMethod||null},quota:{account:s?.account||null,quota:q?{...q,buckets:(q.windows||[]).map(w=>({name:w.name,primary:w}))}:null,source:'SSH · Claude Code',status:!this.connected?'disconnected':s?.account?.authProblem==='credential-unavailable'?'auth-blocked':s?.account?.verified!==true?'auth-unverified':s?.account?.authenticated!==true?'auth-required':s?.quota?.stale?'unavailable':s?.quota?'available':'loading',stale:!this.connected||!!q?.stale,error:s?.account?.error||s?.quota?.error||null},engine:'opencodex-claude-ssh'};}
+ // The usage endpoint is rate limited; show the last successful snapshot (marked stale) instead of an empty panel.
+ cachedQuota(q){
+  const key=this.profile;if(!key)return q;
+  if(!this.quotaCache){try{this.quotaCache=JSON.parse(fs.readFileSync(path.join(this.root,'native-claude-quota.json'),'utf8'));}catch{this.quotaCache={};}}
+  if(q?.windows?.length&&q.updatedAt>0){
+   if(this.quotaCache[key]?.updatedAt!==q.updatedAt){this.quotaCache[key]={updatedAt:q.updatedAt,windows:q.windows};try{fs.writeFileSync(path.join(this.root,'native-claude-quota.json'),JSON.stringify(this.quotaCache),{mode:0o600});}catch{}}
+   return q;
+  }
+  const last=this.quotaCache[key];return last?{...q,windows:last.windows,updatedAt:last.updatedAt,stale:true}:q;
+ }
  async disconnect(){if(this.busy)throw Error('請先停止 Claude 工作。');const r=this.runtime;this.runtime=null;this.loaded.clear();if(r&&!r.closed)await this.invoke('claude:disconnect',r.cli.id);this.onState();}
  async permission(mode){if(this.connected)await this.invoke('claude:permission',this.runtime.cli.id,mode);}
  async refreshAccount(){if(this.connected){await this.runtime.cli.refreshAccount();this.onState();}}
@@ -58,13 +71,18 @@ class NativeClaude{
    this.queue.pause(this.profile,p.threadId);
    if(this.preparing?.threadId===p.threadId)this.preparing.cancelled=true;
    if(this.shell?.active?.remoteThreadId===p.threadId&&(!p.turnId||!this.shell.active.turnId||p.turnId===this.shell.active.turnId)){await this.shell.interrupt();return {};}
-   const run=this.runtime?.run;
-   if(run&&run.threadId===p.threadId&&(!p.turnId||run.turnId===p.turnId)){run.cancelled=true;await this.invoke('claude:cancel',this.runtime.cli.id,run.requestId);}
+   const run=this.runs.get(p.threadId)||(this.runtime?.run?.threadId===p.threadId?this.runtime.run:null);
+   if(run&&run.threadId===p.threadId&&(!p.turnId||run.turnId===p.turnId)){
+    run.cancelled=true;
+    if(run.peerCli)await run.peerCli.cancel(run.requestId);
+    else await this.invoke('claude:cancel',this.runtime.cli.id,run.requestId);
+   }
    return {};
   }
   if(method==='turn/steer')return this.steer(e,p);
   if(!this.connected)throw Error('Claude SSH 尚未連線；歷史對話仍可閱讀。');
-  if(this.busy||(!fromQueue&&this.queue.starting))throw Error('請先停止目前 Claude 工作。');
+  const blocked=this.hasPeerPool()?(this.running(p.threadId)||Boolean(this.shell?.active)):(this.busy||(!fromQueue&&this.queue.starting));
+  if(blocked)throw Error('請先停止目前 Claude 工作。');
   if(['thread/name/set','thread/archive','thread/unarchive','thread/delete','thread/unsubscribe'].includes(method)){
    if(!e)throw Error('缺少 Claude 對話。');
    if(method==='thread/name/set'){if(typeof p.name!=='string'||!p.name.trim())throw Error('對話名稱不可為空。');e.thread.name=p.name;this.note('thread/name/updated',{threadId:p.threadId,threadName:p.name});}
@@ -174,7 +192,7 @@ class NativeClaude{
  }
  async start(e,p,review=null){
   if(!e)throw Error('缺少 Claude 對話。');
-  const owner=this.runtime,preparing={threadId:e.thread.id,cancelled:false};this.preparing=preparing;this.onState();let run;
+  const owner=this.runtime,preparing={threadId:e.thread.id,cancelled:false};this.preparing=preparing;this.onState();let run,peerCli;
   const check=()=>{if(preparing.cancelled||owner!==this.runtime||(owner.closed||this.failed))throw Error('Claude 工作已取消，訊息未送出。');};
   try{
    if(p.collaborationMode&&p.collaborationMode.mode!=='default')throw Error('Claude 尚未支援此協作模式。');
@@ -184,17 +202,24 @@ class NativeClaude{
    await this.workspace(e,p);check();await this.refreshTools(this.runtime);check();
    if(!this.runtime.cli.status().account?.authenticated)await this.runtime.cli.refreshAccount();
    check();const account=this.runtime.cli.status().account;if(!account?.authenticated)throw Error(account?.error||(account?.verified?'遠端 Claude 尚未完成登入。':'無法確認遠端 Claude 登入狀態，請更新後重試。'));
+   const usePeer=Boolean(this.runtime.cli.busy&&this.hasPeerPool());
+   if(usePeer){peerCli=this.runtime.createPeerCli();this.runtime.peerBusyCount=(this.runtime.peerBusyCount||0)+1;await peerCli.start();check();}
    const turn={id:crypto.randomUUID(),status:'inProgress',items:[],startedAt:now(),completedAt:null,error:null};
-   run={openCodex:true,review,threadId:e.thread.id,turnId:turn.id,requestId:turn.id,cancelled:false,turn,entry:e,items:new Map(),startedAt:Date.now()};
-   this.runtime.run=run;e.thread.turns.push(turn);e.thread.model=model;e.thread.updatedAt=now();e.thread.status={type:'active',activeFlags:[]};
+   run={openCodex:true,review,threadId:e.thread.id,turnId:turn.id,requestId:turn.id,cancelled:false,turn,entry:e,items:new Map(),startedAt:Date.now(),peerCli:peerCli||null};
+   this.runs.set(e.thread.id,run);this.runsByRequest.set(run.requestId,run);this.runtime.run=run;
+   e.thread.turns.push(turn);e.thread.model=model;e.thread.updatedAt=now();e.thread.status={type:'active',activeFlags:[]};
    if(!e.thread.preview)e.thread.preview=content.filter(v=>v.type==='text').map(v=>v.text).join('\n').slice(0,200);
    this.loaded.add(e.thread.id);this.save();this.note('turn/started',{threadId:e.thread.id,turn});
    if(review)this.item(run,{id:crypto.randomUUID(),type:'enteredReviewMode',review},true);
    else this.item(run,{id:crypto.randomUUID(),type:'userMessage',content:clone(p.input),clientId:p.clientUserMessageId||null},true);
-   await this.runtime.cli.send({requestId:run.requestId,conversationId:e.conversationId||undefined,forkSession:e.forkSession===true,prompt:content.filter(v=>v.type==='text').map(v=>v.text).join('\n'),content,model,effort:this.effort(model,p.effort||p.reasoningEffort||p.collaborationMode?.settings?.reasoning_effort||e.thread.reasoningEffort),systemPrompt:e.instructions});
+   await (peerCli||this.runtime.cli).send({requestId:run.requestId,conversationId:e.conversationId||undefined,forkSession:e.forkSession===true,prompt:content.filter(v=>v.type==='text').map(v=>v.text).join('\n'),content,model,effort:this.effort(model,p.effort||p.reasoningEffort||p.collaborationMode?.settings?.reasoning_effort||e.thread.reasoningEffort),systemPrompt:e.instructions});
    if(pending.length){e.pendingContext=(e.pendingContext||[]).slice(pending.length);this.save();}
    return {turn:clone(turn)};
-  }catch(error){if(run&&this.runtime?.run===run)this.finish('failed',error.message);throw error;}
+  }catch(error){
+   if(run&&(this.runs.get(e.thread.id)===run||this.runtime?.run===run))this.finish('failed',error.message,run);
+   else if(peerCli){this.runtime.peerBusyCount=Math.max(0,(this.runtime.peerBusyCount||1)-1);void peerCli.stop().catch(()=>{});}
+   throw error;
+  }
   finally{this.preparing=false;this.onState();}
  }
  // Native "steer": guidance for the turn already running. The app-server's own error
@@ -202,14 +227,15 @@ class NativeClaude{
  // with the turn id it reports.
  async steer(e,p){
   if(!e)throw Error('缺少 Claude 對話。');
-  const run=this.runtime?.run;
-  if(!this.connected||!run||run.threadId!==e.thread.id||run.cancelled)throw Error('no active turn to steer');
+  const run=this.runs.get(e.thread.id)||(this.runtime?.run?.threadId===e.thread.id?this.runtime.run:null);
+  const isCurrent=()=>Boolean(run&&(this.runtime?.run===run||this.runs.get(e.thread.id)===run));
+  if(!this.connected||!run||run.threadId!==e.thread.id||run.cancelled||!isCurrent())throw Error('no active turn to steer');
   if(run.review)throw Error('cannot steer a review turn');
   if(p.expectedTurnId&&p.expectedTurnId!==run.turnId)throw Error('expected active turn id `'+p.expectedTurnId+'` but found `'+run.turnId+'`');
   const content=await this.content(p.input);
   if(typeof p.additionalContext==='string'&&p.additionalContext.trim())content.push({type:'text',text:p.additionalContext});
-  if(this.runtime?.run!==run||run.cancelled||!this.connected)throw Error('no active turn to steer');
-  this.runtime.cli.steer(content);
+  if(!isCurrent()||run.cancelled||!this.connected)throw Error('no active turn to steer');
+  (run.peerCli||this.runtime.cli).steer(content);
   this.item(run,{id:crypto.randomUUID(),type:'userMessage',content:clone(p.input),clientId:p.clientUserMessageId||null},true);
   e.thread.updatedAt=now();this.save();
   return {turnId:run.turnId};
@@ -228,12 +254,17 @@ class NativeClaude{
   return item;
  }
  event(event){
-  const r=this.runtime;if(!r||event.runtimeId!==r.cli.id)return;
-  if(event.type==='closed'){this.failed=true;if(r.run)this.finish('interrupted',event.text||'SSH 已中斷，工作未重送。');this.loaded.clear();this.onState();return;}
+  const r=this.runtime;if(!r||(event.runtimeId!==r.cli.id&&!(event.requestId&&this.runsByRequest.has(event.requestId))))return;
+  if(event.type==='closed'&&event.runtimeId===r.cli.id){
+   this.failed=true;
+   for(const active of new Set([...this.runs.values(),...(r.run?[r.run]:[])]))this.finish('interrupted',event.text||'SSH 已中斷，工作未重送。',active);
+   this.loaded.clear();this.onState();return;
+  }
   if(event.type==='claudeQuota'||event.type==='status'){this.onState();return;}
-  const run=r.run;if(!run||event.requestId&&event.requestId!==run.requestId)return;
-  if(event.type==='approval'){void this.approval(event).catch(this.onError);return;}
-  if(event.type==='userInput'){this.question(event);return;}
+  const run=(event.requestId&&this.runsByRequest.get(event.requestId))||r.run;
+  if(!run||(event.requestId&&event.requestId!==run.requestId))return;
+  if(event.type==='approval'){void this.approval(event,run).catch(this.onError);return;}
+  if(event.type==='userInput'){this.question(event,run);return;}
   if(event.type==='session'){this.adoptSession(run.entry,event.conversationId);this.save();return;}
   if(event.type==='message'&&typeof event.text==='string'){
    let item=run.items.get('message:'+run.turnId);
@@ -250,17 +281,20 @@ class NativeClaude{
   }
   if(event.type==='contextCompacted')this.item(run,{id:crypto.randomUUID(),type:'contextCompaction'},true);
   if(event.type==='error')run.error=event.text;
-  if(event.type==='done'){if(event.conversationId)this.adoptSession(run.entry,event.conversationId);const forkFailed=run.entry.forkSession&&event.status==='completed';this.finish(forkFailed?'failed':event.status==='completed'?'completed':event.status==='cancelled'?'interrupted':'failed',forkFailed?'Claude 未確認獨立分支工作階段；原對話未切換。':event.error||event.text||run.error);}
+  if(event.type==='done'){if(event.conversationId)this.adoptSession(run.entry,event.conversationId);const forkFailed=run.entry.forkSession&&event.status==='completed';this.finish(forkFailed?'failed':event.status==='completed'?'completed':event.status==='cancelled'?'interrupted':'failed',forkFailed?'Claude 未確認獨立分支工作階段；原對話未切換。':event.error||event.text||run.error,run);}
  }
- finish(status,error){
-  const r=this.runtime,run=r?.run;if(!run)return;
+ finish(status,error,targetRun){
+  const r=this.runtime,run=targetRun||r?.run;if(!run)return;
   for(const item of run.turn.items){
    if(item.type==='agentMessage')this.note('item/completed',{threadId:run.threadId,turnId:run.turnId,item});
    if(item.type==='mcpToolCall'&&item.status==='inProgress'){item.status='failed';item.error={message:error||'工作已結束，工具結果未確認。'};this.note('item/completed',{threadId:run.threadId,turnId:run.turnId,item});}
   }
   if(run.review)this.item(run,{id:crypto.randomUUID(),type:'exitedReviewMode',review:run.turn.items.filter(i=>i.type==='agentMessage').map(i=>i.text).join('\n\n')||error||'審查未產生結果。'},true);
   Object.assign(run.turn,{status,error:error?{message:error}:null,completedAt:now(),durationMs:Date.now()-run.startedAt});
-  run.entry.thread.updatedAt=now();run.entry.thread.status={type:'idle'};r.run=null;
+  run.entry.thread.updatedAt=now();run.entry.thread.status={type:'idle'};
+  this.runs.delete(run.threadId);this.runsByRequest.delete(run.requestId);
+  if(r?.run===run)r.run=this.runs.values().next().value||null;
+  if(run.peerCli){if(r)r.peerBusyCount=Math.max(0,(r.peerBusyCount||1)-1);void run.peerCli.stop().catch(()=>{});}
   try{this.save();}catch(e){this.onError(e);}this.note('turn/completed',{threadId:run.threadId,turn:run.turn});this.queue.completed(this.profile,run.threadId,status);this.onState();
  }
  scope(approvalId){
@@ -268,13 +302,14 @@ class NativeClaude{
   if(!entry||p.isQuestion||!['ask','project'].includes(r.permissionMode)||!n?.hostFingerprint)return null;
   return {profileId:n.profileId,hostKey:r.hostKey,fingerprint:n.hostFingerprint,cwd:r.cwd,mode:r.permissionMode,tool:p.toolName,extension:'claude:'+(entry.extensionId||'opencodex-built-in'),schema:crypto.createHash('sha256').update(JSON.stringify(entry.tool.inputSchema||{})).digest('hex'),hostLabel:r.hostName};
  }
- async approval(event){
-  const r=this.runtime;
-  return policy.localApproval({event,runtime:r,isPending:()=>r.pending.has(event.approvalId),grants:this.grants,getScope:()=>this.scope(event.approvalId),show:this.showApproval,onChange:this.onState,onError:this.onError,respond:decision=>this.invoke('claude:respond',{runtimeId:r.cli.id,approvalId:event.approvalId,decision})});
+ async approval(event,targetRun){
+  const r=this.runtime,run=targetRun||(event.requestId&&this.runsByRequest.get(event.requestId))||r.run;
+  const runtimeView=run?Object.assign(Object.create(r),{run}):r;
+  return policy.localApproval({event,runtime:runtimeView,isPending:()=>r.pending.has(event.approvalId),grants:this.grants,getScope:()=>this.scope(event.approvalId),show:this.showApproval,onChange:this.onState,onError:this.onError,respond:decision=>this.invoke('claude:respond',{runtimeId:r.cli.id,approvalId:event.approvalId,decision})});
  }
- question(event){
-  const r=this.runtime,run=r.run,id=event.approvalId;
-  const respond=answer=>{if(r!==this.runtime||r.run!==run||run.cancelled||!r.pending.has(id))return;return this.invoke('claude:respond',{runtimeId:r.cli.id,approvalId:id,...answer});};
+ question(event,targetRun){
+  const r=this.runtime,run=targetRun||r.run,id=event.approvalId;
+  const respond=answer=>{if(r!==this.runtime||(r.run!==run&&this.runs.get(run?.threadId)!==run)||run.cancelled||!r.pending.has(id))return;return this.invoke('claude:respond',{runtimeId:r.cli.id,approvalId:id,...answer});};
   const message={id,method:'item/tool/requestUserInput',params:{threadId:run.threadId,turnId:run.turnId,itemId:id,isBlocking:true,questions:(event.questions||[]).map(q=>({id:q.id,header:q.header||'Claude',question:q.question,options:q.options||[],isOther:true,isSecret:false}))}};
   if(!this.forwardRequest(message,{respond:(_id,result)=>void respond({decision:'accept',answers:Object.fromEntries(Object.entries(result.answers||{}).map(([key,v])=>[key,v.answers||[]]))})?.catch(this.onError),reject:()=>void respond({decision:'decline'})?.catch(this.onError)}))void respond({decision:'decline'})?.catch(this.onError);
  }

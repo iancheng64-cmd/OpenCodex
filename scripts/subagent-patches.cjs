@@ -84,19 +84,25 @@ function core(source){
 }
 function backend(source){
  source=replace(source,'        run.turnId = params.turn?.id;','        if (!run.nativeReview) run.turnId = params.turn?.id;');
- source=replace(source,'async function authorizeMacTool(runtime, deps, call) {','async function authorizeMacTool(runtime, deps, call) {\n    if (runtime?.openCodexSubagents) return runtime.openCodexSubagents.authorize(call);');
- source=replace(source,'function routeServerRequest(runtime, deps, request) {','function routeServerRequest(runtime, deps, request) {\n    if (runtime.openCodexSubagents?.serverRequest(request)) return;');
- source=replace(source,'function routeNotification(runtime, deps, message) {','function routeNotification(runtime, deps, message) {\n    runtime.openCodexSubagents?.notification(message);');
- source=replace(source,'    runtime.closed = true;','    runtime.openCodexSubagents?.close();\n    runtime.closed = true;');
- if(!source.includes('const managedCancellation = run.openCodex && runtime.openCodexSubagents;'))source=replace(source,'        run.cancelled = true;\n        runtime.toolHost?.cancelActive();','        if (run.openCodex && runtime.openCodexSubagents) await runtime.openCodexSubagents.cancel(run.threadId, run.turnId);\n        run.cancelled = true;\n        runtime.toolHost?.cancelActive();');
- // The coordinator already interrupts the root (including review IDs). Avoid
- // sending a second interrupt after the remote thread has been unloaded, and
- // always arm local cancellation cleanup even if the remote request fails.
- source=replace(source,'        if (run.openCodex && runtime.openCodexSubagents) await runtime.openCodexSubagents.cancel(run.threadId, run.turnId);','        const managedCancellation = run.openCodex && runtime.openCodexSubagents;');
- // Managed cancellation must establish the one-shot Interrupt Hook lease
- // before marking the root cancelled. Its scoped cleanup also preserves the
- // host generation needed by that lease and never cancels unrelated work.
- source=replace(source,'        const managedCancellation = run.openCodex && runtime.openCodexSubagents;\n        run.cancelled = true;\n        runtime.toolHost?.cancelActive();','        const managedCancellation = run.openCodex && runtime.openCodexSubagents;\n        if (!managedCancellation) {\n            run.cancelled = true;\n            runtime.toolHost?.cancelActive();\n        }');
+ const authAfter='    const activeSubagents = (runtime?.openCodexSubagentsByThread instanceof Map && runtime?.toolHost?.openCodexCurrentRun?.()?.threadId ? runtime.openCodexSubagentsByThread.get(runtime.toolHost.openCodexCurrentRun().parentThreadId || runtime.toolHost.openCodexCurrentRun().threadId) : null) || runtime?.openCodexSubagents;\n    if (activeSubagents) return activeSubagents.authorize(call);';
+ if(!source.includes(authAfter))source=replace(source,'async function authorizeMacTool(runtime, deps, call) {','async function authorizeMacTool(runtime, deps, call) {\n    if (runtime?.openCodexSubagents) return runtime.openCodexSubagents.authorize(call);');
+ source=replace(source,'    if (runtime?.openCodexSubagents) return runtime.openCodexSubagents.authorize(call);',authAfter);
+ const srvAfter='    if (runtime.openCodexSubagentsByThread instanceof Map) { for (const sub of runtime.openCodexSubagentsByThread.values()) if (sub?.serverRequest(request)) return; } else if (runtime.openCodexSubagents?.serverRequest(request)) return;';
+ if(!source.includes(srvAfter))source=replace(source,'function routeServerRequest(runtime, deps, request) {','function routeServerRequest(runtime, deps, request) {\n    if (runtime.openCodexSubagents?.serverRequest(request)) return;');
+ source=replace(source,'    if (runtime.openCodexSubagents?.serverRequest(request)) return;',srvAfter);
+ const notifAfter='    if (runtime.openCodexSubagentsByThread instanceof Map) { for (const sub of runtime.openCodexSubagentsByThread.values()) sub?.notification(message); } else runtime.openCodexSubagents?.notification(message);\n    const params = message.params || {};\n    const run = (params.threadId && runtime.runs?.get(params.threadId)) || runtime.run;';
+ if(!source.includes(notifAfter))source=replace(source,'function routeNotification(runtime, deps, message) {','function routeNotification(runtime, deps, message) {\n    runtime.openCodexSubagents?.notification(message);');
+ source=replace(source,'    runtime.openCodexSubagents?.notification(message);\n    const params = message.params || {};\n    const run = runtime.run;',notifAfter);
+ const closeAfter='    if (runtime.openCodexSubagentsByThread instanceof Map) { for (const sub of runtime.openCodexSubagentsByThread.values()) sub?.close(); runtime.openCodexSubagentsByThread.clear(); }\n    runtime.openCodexSubagents?.close();\n    runtime.runs?.clear();\n    runtime.closed = true;';
+ if(!source.includes(closeAfter))source=replace(source,'    runtime.closed = true;','    runtime.openCodexSubagents?.close();\n    runtime.closed = true;');
+ source=replace(source,'    runtime.openCodexSubagents?.close();\n    runtime.closed = true;',closeAfter);
+ const mgdAfter='        const managedCancellation = run.openCodex && (runtime.openCodexSubagentsByThread?.get(run.threadId) || runtime.openCodexSubagents);';
+ if(!source.includes(mgdAfter)){
+  if(!source.includes('const managedCancellation = run.openCodex && runtime.openCodexSubagents;'))source=replace(source,'        run.cancelled = true;\n        runtime.toolHost?.cancelActive();','        if (run.openCodex && runtime.openCodexSubagents) await runtime.openCodexSubagents.cancel(run.threadId, run.turnId);\n        run.cancelled = true;\n        runtime.toolHost?.cancelActive();');
+  source=replace(source,'        if (run.openCodex && runtime.openCodexSubagents) await runtime.openCodexSubagents.cancel(run.threadId, run.turnId);','        const managedCancellation = run.openCodex && runtime.openCodexSubagents;');
+  source=replace(source,'        const managedCancellation = run.openCodex && runtime.openCodexSubagents;\n        run.cancelled = true;\n        runtime.toolHost?.cancelActive();','        const managedCancellation = run.openCodex && runtime.openCodexSubagents;\n        if (!managedCancellation) {\n            run.cancelled = true;\n            runtime.toolHost?.cancelActive();\n        }');
+ }
+ source=replace(source,'        const managedCancellation = run.openCodex && runtime.openCodexSubagents;',mgdAfter);
  source=replace(source,'        if (run.threadId && run.turnId)\n            await runtime.rpc.request("turn/interrupt", { threadId: run.threadId, turnId: run.turnId });\n        else if (!run.turnStarting) {',`        try {
         if (managedCancellation) await managedCancellation.cancel(run.threadId, run.turnId);
         if (run.threadId && run.turnId) {
@@ -104,7 +110,14 @@ function backend(source){
         } else if (!run.turnStarting) {`);
  source=replace(source,'        // A turn in flight is normally released by the turn/completed notification.','        } finally {\n        // A turn in flight is normally released by the turn/completed notification.');
  source=replace(source,'        return { cancelled: true };\n    });\n    electron_1.ipcMain.handle("runtime:respond"','        } // cancellation cleanup guard\n        return { cancelled: true };\n    });\n    electron_1.ipcMain.handle("runtime:respond"');
- source=replace(source,'Boolean(runtime.run && !runtime.run.cancelled)','Boolean(pending.openCodexRun ? runtime.openCodexSubagents?.isActive(pending.openCodexRun) : runtime.run && !runtime.run.cancelled)');
+ const respAfter='Boolean(pending.openCodexRun ? (runtime.openCodexSubagentsByThread?.get(pending.openCodexRun.parentThreadId || pending.openCodexRun.threadId) || runtime.openCodexSubagents)?.isActive(pending.openCodexRun) : (runtime.run && !runtime.run.cancelled) || runtime.runs?.size)';
+ if(!source.includes(respAfter))source=replace(source,'Boolean(runtime.run && !runtime.run.cancelled)','Boolean(pending.openCodexRun ? runtime.openCodexSubagents?.isActive(pending.openCodexRun) : runtime.run && !runtime.run.cancelled)');
+ source=replace(source,'Boolean(pending.openCodexRun ? runtime.openCodexSubagents?.isActive(pending.openCodexRun) : runtime.run && !runtime.run.cancelled)',respAfter);
+ source=replace(source,'        runtime.toolHost?.cancelActive();\n        const status = run.cancelled','        if (runtime.runs?.size > 1) runtime.toolHost?.cancelRun?.(run); else runtime.toolHost?.cancelActive();\n        const status = run.cancelled');
+ source=replace(source,'        const currentThreadId = run.threadId;\n        runtime.run = undefined;','        const currentThreadId = run.threadId;\n        runtime.runs?.delete(currentThreadId);\n        runtime.openCodexSubagentsByThread?.delete(currentThreadId);\n        if (runtime.run === run) runtime.run = runtime.runs?.values().next().value;\n        if (runtime.openCodexSubagents?.root === run) runtime.openCodexSubagents = runtime.openCodexSubagentsByThread?.values().next().value;');
+ source=replace(source,'        const run = runtime.run;\n        if (!run || run.requestId !== requestId)','        const run = (runtime.run?.requestId === requestId ? runtime.run : (runtime.runs instanceof Map ? [...runtime.runs.values()].find(r => r?.requestId === requestId) : undefined)) || runtime.run;\n        if (!run || run.requestId !== requestId)');
+ source=replace(source,'            if (runtime.run === run)\n                runtime.run = undefined;','            runtime.runs?.delete(run.threadId);\n            runtime.openCodexSubagentsByThread?.delete(run.threadId);\n            if (runtime.run === run)\n                runtime.run = runtime.runs?.values().next().value;');
+ source=replace(source,'        if ((run.turnId || run.turnStarting) && runtime.run === run) {\n            setTimeout(() => {\n                if (runtime.run !== run || !run.cancelled)\n                    return;\n                emitForRun(runtime, deps, { type: "done", status: "cancelled", conversationId: run.threadId });\n                runtime.run = undefined;','        if ((run.turnId || run.turnStarting) && (runtime.run === run || runtime.runs?.get(run.threadId) === run)) {\n            setTimeout(() => {\n                if ((runtime.run !== run && runtime.runs?.get(run.threadId) !== run) || !run.cancelled)\n                    return;\n                emitForRun(runtime, deps, { type: "done", status: "cancelled", conversationId: run.threadId });\n                runtime.runs?.delete(run.threadId);\n                runtime.openCodexSubagentsByThread?.delete(run.threadId);\n                if (runtime.run === run)\n                    runtime.run = runtime.runs?.values().next().value;');
  return source;
 }
 // HTTP tool calls can wait for approval or long-running work. The default

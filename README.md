@@ -1,14 +1,16 @@
-# OpenCodex 0.4.12 · 預覽版
+# OpenCodex 0.4.15 · 預覽版
 
-OpenCodex 是 macOS 上的獨立 AI 工作介面：保留原生對話、側邊欄與模型選單，讓同一個對話接續使用 Codex、Claude Code、Antigravity CLI 與 Grok CLI。模型可以在 SSH 伺服器運行，檔案與工具則透過已授權的 Mac 執行端工作。
+OpenCodex 是 macOS 上的獨立 AI 工作介面：保留原生對話、側邊欄與模型選單，讓同一個對話接續使用 Codex、Claude Code、Antigravity CLI 與 Grok CLI。模型可以在 SSH 伺服器運行，檔案與工具則透過 App 內建的 Mac 執行端工作。
+
+**獨立運作：** OpenCodex 有自己的 SSH 連線、Mac 執行端與工具主機，不需要安裝或開啟 AgentBridge Studio，也不讀取它的資料。內建執行端是 MIT 授權的 fork，授權聲明保留在 `THIRD-PARTY-AGENTBRIDGE-LICENSE`。
 
 這是非官方修改版，與 OpenAI、Anthropic、Google、xAI、Cursor 均無官方合作關係。介面基於固定版本的原生封裝，並非從零實作的開源 ChatGPT，也不代表支援所有 ChatGPT 雲端功能。第三方程式仍受各自授權條款約束；本儲存庫沒有授予原廠程式的再散布權。
 
-**0.4.12 為預覽版。** 實機驗收涵蓋 GPT ↔ Grok 切換、前文交接、Mac 工具、引導、排定模型快照、停止操作、模型選單及 Composio。Antigravity 已驗證 14 個模型可列出，並透過 Gemini 完成實際回覆。Claude 的 SSH 憑證授權仍待處理，實際生成尚未通過；逐模型額度只顯示供應商確實提供的資料。完整回歸缺少 11 個舊版進階情境，仍為未通過；詳見下方驗證範圍。
+**0.4.14 為預覽版。** 已安裝並用真實模型（gpt-6-astra，含 3 個子代理）實測 Mac 工具、技能工具與自動壓縮修正：修正前 21 分鐘 63 次工具呼叫、27 次壓縮；修正後 14 分鐘 159 次、0 次壓縮。視窗附加到進行中回合以隔離環境的實際視窗驗證。0.4.12 的實機驗收涵蓋 GPT ↔ Grok 切換、前文交接、Mac 工具、引導、排定模型快照、停止操作、模型選單及 Composio。Antigravity 已驗證 14 個模型可列出，並透過 Gemini 完成實際回覆。Claude 的 SSH 憑證授權仍待處理，實際生成尚未通過；逐模型額度只顯示供應商確實提供的資料。完整回歸缺少 11 個舊版進階情境，仍為未通過；詳見下方驗證範圍。
 
 ## 安裝與更新
 
-1. 從本專案 Releases 下載 `OpenCodex-0.4.12.dmg`；同版提供來源 ZIP、SHA-256 及驗證 JSON。
+1. 從本專案 Releases 下載最新版 DMG（目前發布為 `OpenCodex-0.4.15.dmg`）；同版提供來源 ZIP、SHA-256 及驗證 JSON。
 2. 關閉原有 OpenCodex，開啟 DMG，將 `OpenCodex.app` 拖到 Applications。
 3. 啟動後在設定加入 SSH 主機、使用者、認證方式與本機專案資料夾。
 4. 首次連線核對 SSH 指紋；依工具需要授予 macOS 輔助使用、螢幕錄製或檔案存取權限。
@@ -90,6 +92,27 @@ Grok Bot 官方說明中，Auto 可能使用包括 Opus 5.5 在內的後端模�
 
 端點為 `https://connect.composio.dev/mcp`。授權使用本機 App 的憑證儲存流程，不提交 Git、不放進來源 ZIP。連接 Composio 不會自動授權所有線上帳號。本版驗證連線及 11 個 MCP 工具，並未測試所有第三方服務。
 
+## Agent 工作環境
+
+模型不必被告知工具名稱，會依任務自行選用。每個對話都會拿到一份描述實際環境的指令，並可使用：
+
+| 能力 | 工具 |
+| --- | --- |
+| 技能 | `mac_skill_search`、`mac_skill_view`：搜尋並讀取這台 Mac 上 Codex、共用 Agents、Claude Code、Hermes、OpenCode 與 Codex 外掛的所有技能，同名時專案優先 |
+| 跨對話記憶 | `mac_memory_read`、`mac_memory_write`：使用者資料與 Agent 筆記，存於 `~/Library/Application Support/OpenCodex/agent-memory/`，拒絕儲存密碼與 Token，開新對話時自動載入 |
+| 過去對話 | `mac_session_search`：搜尋 Mac 上快取的 OpenCodex 對話內容 |
+| 全域指令 | 自動載入這台 Mac 的 `~/.codex/AGENTS.md`；專案 `AGENTS.md` 由 Codex 透過 Mac 環境讀取 |
+| 規劃與檢查點 | `update_plan`、`mac_task_plan`，以及持續工作到完成的「目標」 |
+| 檔案與程式 | Mac 上的 shell、`apply_patch`、`mac_fs_*`、`mac_process_*` |
+| 網路 | GPT 預設使用即時 `web_search`（主機 `config.toml` 可覆蓋），另有 `mac_web_fetch`、`mac_browser_*` |
+| 桌面 | `mac_computer_*`，需要 macOS 權限 |
+| 分工 | 子代理、`opencodex_agents_*` 雙代理討論 |
+| MCP 與帳號 | `~/.codex/config.toml` 與 App 設定的 MCP 伺服器、Composio |
+
+其他 Agent 的記憶（`~/.codex/memories`、`~/.hermes/memories`、`~/.claude/CLAUDE.md`）留在原位，模型需要時才會搜尋。
+
+「目標」接續時不會在沒有 Mac 工具的情況下空跑：對話重新載入時先暫停目標，等下一個回合選定 Mac 環境後自動恢復。伺服器自行開始的回合可以正常使用工具、引導與停止。
+
 ## 功能範圍
 
 保留原生對話、側邊欄、模型選單、工具卡片與適用的工作區功能，新增統一路由、前文交接、Mac 工具橋接、全帳號用量與 Composio。外部供應商的附件、工具、模型與回合事件仍受各自 CLI 能力限制。
@@ -128,7 +151,7 @@ OpenCodex ssh list | OpenCodex models | OpenCodex status | OpenCodex sessions
 
 ## 開發與建置
 
-**全新 clone 不能直接建出完整 App。** 專案是固定原生基底上的修改工具，使用 ChatGPT `26.1007.71326` build `20398` 與 AgentBridge 執行端。新版官方 App 不能直接混用；版本或 patch 定位不符會中止。
+**全新 clone 不能直接建出完整 App。** 專案是固定原生基底上的修改工具，使用 ChatGPT `26.1007.71326` build `20398` 與內建的 Mac 執行端（AgentBridge 的 MIT fork）。新版官方 App 不能直接混用；版本或 patch 定位不符會中止。
 
 - `src/`：統一路由、原生介面、工具／權限、供應商與 Composio。
 - `scripts/`：固定版本 patch、測試、完整性、簽署與封裝。
@@ -157,6 +180,11 @@ node scripts/unified-providers-test.cjs
 node scripts/selection-flow-test.cjs
 node scripts/native-config-mutations-test.cjs
 node scripts/composio-test.cjs
+node scripts/agent-environment-test.cjs
+node scripts/native-goal-guard-test.cjs
+node scripts/identity-independence-test.cjs
+node scripts/native-goal-guard-e2e.cjs      # 真實 0.160 引擎與模擬模型，不需帳號
+node scripts/standalone-flow-e2e.cjs        # 需開啟「遠端登入」：在隔離家目錄啟動 App，走完連線、斷線與重連
 ```
 
 實機 QA 的 `unified-providers-live.cjs`、`unified-providers-ui.cjs` 需要開發 App 使用 `--opencodex-test --remote-debugging-port=9325`、已登入帳號與已授權測試工作區，會使用少量模型額度。一般安裝啟動不使用 QA 參數。不要公開 QA 端點或原始模型事件。
