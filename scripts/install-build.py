@@ -14,7 +14,9 @@ from datetime import datetime, timezone
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'build/OpenCodex.app')
 DST = '/Applications/OpenCodex.app'
-SYSTEM_HOLDERS = {'NotificationCenter', 'NotificationsSettingsIntents', 'mds', 'mdworker', 'mds_stores', 'Finder', 'lsd', 'quicklookd', 'QuickLookUIService', 'spotlightknowledged'}
+SYSTEM_HOLDERS = {'NotificationCenter', 'NotificationsSettingsIntents', 'mds', 'mdworker', 'mds_stores', 'Finder', 'lsd', 'quicklookd', 'QuickLookUIService', 'spotlightknowledged', 'com.apple.dock.external.extra.a'}
+# Helpers the app leaves behind for a moment after it quits; they are asked to exit before the swap.
+APP_HELPERS = {'browser_crashpad_handler', 'bare-modifier-monitor', 'OpenCodexEngine Helper', 'OpenCodexEngine Helper (GPU)', 'OpenCodexEngine Helper (Renderer)', 'OpenCodexEngine Helper (Plugin)'}
 
 
 def run(*cmd, check=True):
@@ -75,14 +77,38 @@ def main():
         if app_pids():
             if not quit_app:
                 raise SystemExit('OpenCodex is running; pass --quit to close it first')
+            # Ask politely first; an Electron app that ignores the Apple event still exits cleanly on
+            # SIGTERM (its before-quit handlers run). Never SIGKILL: that could lose unsaved state.
             run('osascript', '-e', 'tell application "OpenCodex" to quit', check=False)
-            for _ in range(60):
+            for _ in range(20):
                 if not app_pids():
                     break
                 time.sleep(0.5)
             if app_pids():
+                for pid in app_pids():
+                    try:
+                        os.kill(pid, 15)
+                    except ProcessLookupError:
+                        pass
+                for _ in range(60):
+                    if not app_pids():
+                        break
+                    time.sleep(0.5)
+            if app_pids():
                 raise SystemExit('OpenCodex did not quit')
+            time.sleep(1)
         busy = holders(DST)
+        if busy and quit_app and all(name in APP_HELPERS for name in busy.values()):
+            for pid in busy:
+                try:
+                    os.kill(pid, 15)
+                except ProcessLookupError:
+                    pass
+            for _ in range(20):
+                busy = holders(DST)
+                if not busy:
+                    break
+                time.sleep(0.5)
         if busy:
             raise SystemExit(f'installed app is in use by {busy}')
     stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
