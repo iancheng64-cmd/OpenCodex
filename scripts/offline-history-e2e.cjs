@@ -30,6 +30,7 @@ const report={version:'0.4.15',at:new Date().toISOString(),checks:{},errors:[]};
   report.offlineEvents=h.events().filter(e=>/ssh-autoconnect|shell-ready/.test(e.type)).slice(-4).map(e=>e.type);
   const list=await h.client.call('thread/list',{});
   assert.ok(list.data.some(t=>t.id===A),'offline list still shows the conversation');
+  assert.ok(list.data.every(t=>Array.isArray(t.turns)),'cached rows carry a turns array like engine rows');
   assert.deepEqual(await h.client.call('thread/goal/get',{threadId:A}),{goal:null});
   assert.deepEqual(await h.client.call('thread/attachment/list',{threadId:A}),{data:[],nextCursor:null});
   assert.equal((await h.client.call('thread/timeline/list',{threadId:A})).data.length,0);

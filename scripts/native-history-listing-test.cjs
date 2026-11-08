@@ -18,6 +18,17 @@ const known={a1:summary('a1','A',30),a2:summary('a2','A',10),b1:summary('b1','B'
    assert.deepEqual(routing.cachedPage('thread/search',{searchTerm:'B1'},known,'A',{scope:'all'}).data.map(r=>r.thread.id),['b1']);
    assert.deepEqual(routing.cachedAll('thread/list',{limit:1},known,'A',{scope:'all'}).map(t=>t.id),['a1','b1','a2']);
   });
+  await test('cached rows look like engine rows and answer sub-agent discovery filters',async()=>{
+   const k={...known,s1:{profile:'A',summary:{id:'s1',preview:'child',updatedAt:31,createdAt:31,cwd:'/w',threadSource:'subagent',parentThreadId:'a1',source:'vscode'}},s2:{profile:'A',summary:{id:'s2',preview:'grandchild',updatedAt:32,createdAt:32,cwd:'/w',threadSource:'subagent',parentThreadId:'s1',source:'vscode'}},tt:{profile:'A',summary:{id:'tt',preview:'',updatedAt:33,createdAt:33,cwd:'/w',threadSource:'thread_title',ephemeral:true}}};
+   const general=routing.cachedPage('thread/list',{},k,'A');
+   assert.deepEqual(general.data.map(t=>t.id),['a1','a2'],'sub-agent and title threads stay out of the plain list');
+   assert.ok(general.data.every(t=>Array.isArray(t.turns)&&t.turns.length===0),'every cached row carries turns:[]');
+   assert.deepEqual(routing.cachedPage('thread/list',{parentThreadId:'a1',sourceKinds:['subAgentThreadSpawn'],archived:false,sortKey:'created_at',sortDirection:'desc'},k,'A').data.map(t=>t.id),['s1']);
+   assert.deepEqual(routing.cachedPage('thread/list',{ancestorThreadId:'a1',sourceKinds:['subAgentThreadSpawn']},k,'A').data.map(t=>t.id),['s2','s1']);
+   assert.deepEqual(routing.cachedPage('thread/list',{sourceKinds:['vscode','cli']},k,'A').data.map(t=>t.id),['a1','a2']);
+   assert.equal(routing.generalListing({}),true);assert.equal(routing.generalListing({sourceKinds:['vscode']}),true);
+   assert.equal(routing.generalListing({parentThreadId:'a1',sourceKinds:['subAgentThreadSpawn']}),false);assert.equal(routing.generalListing({ancestorThreadId:'a1'}),false);
+  });
   await test('the organization join keeps other hosts out unless asked, then lists them read-only',async()=>{
    const org=new NativeOrganization(path.join(dir,'org.json'),{localRequest:async()=>({data:[]}),owns:(p,id)=>known[id]?.profile===p&&!known[id].deleted,foreign:id=>!!known[id]?.summary&&!known[id].deleted});
    const fetch=query=>routing.cachedPage('thread/list',query,known,'A',{scope:'all'});

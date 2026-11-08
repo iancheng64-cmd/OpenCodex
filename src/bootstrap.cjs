@@ -472,7 +472,8 @@ async function request(ws,method,params,fromQueue=false){
  // The quota monitor reads and displays the remote account independently.
  if(method==='account/read')return {account:null,requiresOpenaiAuth:false};
  if(method.startsWith('thread/queue/')){
-  if(known[params?.threadId]?.profile!==profileId)throw Error('此佇列不屬於目前 OpenCodex 主機。');
+  // Another host's conversation has no queue here; the window just sees an empty list.
+  if(known[params?.threadId]?.profile!==profileId){if(method==='thread/queue/list')return {data:[],nextCursor:null};throw Error('此佇列不屬於目前 OpenCodex 主機。');}
   const queued=await nativeQueue.request(method,params,profileId);
   audit('rpc',{method,threadId:params.threadId,success:true,...(method==='thread/queue/add'?{queued:queued?.queuedSubmission?.id}:{})});
   return queued;
@@ -526,7 +527,7 @@ async function request(ws,method,params,fromQueue=false){
   if(method==='thread/list'||method==='thread/search')return organization.listPage(profileId,method,params||{},async query=>{
    const page=await routing.ownedPage(owner.rpc,method,query,known,profileId);
    // Conversations cached from other hosts stay listed; they open from the cache here.
-   if(!query.cursor)page.data=[...page.data,...routing.cachedAll(method,query,known,profileId,{scope:'others'})];
+   if(!query.cursor&&routing.generalListing(query))page.data=[...page.data,...routing.cachedAll(method,query,known,profileId,{scope:'others'})];
    return page;
   },{foreign:true});
   if(method==='thread/loaded/list'&&sessions.workers.size){

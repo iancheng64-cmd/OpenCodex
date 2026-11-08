@@ -39,10 +39,22 @@ async function ownedPage(rpc,method,params,known,profile){
 }
 // scope: 'own' = this host; 'others' = conversations cached from every other host, which open from
 // the cache until that host is connected again; 'all' = both.
+// Engine list rows always carry `turns` (empty when not loaded); the window dereferences it while
+// grouping sub-agent threads, so cached rows must look the same. Sub-agent discovery asks with
+// parentThreadId/ancestorThreadId and sourceKinds; cached rows honour those filters too.
+const SUBAGENT_KINDS=new Set(['subAgent','subAgentReview','subAgentCompact','subAgentThreadSpawn','subAgentOther']);
+function descendsFrom(known,id,ancestor){for(let cur=known[id]?.summary?.parentThreadId,depth=0;cur&&depth<32;cur=known[cur]?.summary?.parentThreadId,depth++)if(cur===ancestor)return true;return false;}
+// A plain sidebar/history query, where other hosts' cached conversations may be merged in.
+function generalListing(params={}){return !params.parentThreadId&&!params.ancestorThreadId&&!params.cwd&&!params.searchTerm&&!(Array.isArray(params.sourceKinds)&&params.sourceKinds.some(k=>SUBAGENT_KINDS.has(k)));}
 function cachedPage(method,params,known,profile,{scope='own'}={}){
- const mine=t=>t.profile===profile,shown=t=>t.summary&&!t.deleted&&!(t.emptyHistory===true&&!t.summary.name&&!t.summary.preview);
- let data=Object.values(known).filter(t=>shown(t)&&(scope==='all'||(scope==='others'?!mine(t):mine(t)))).map(t=>({...t.summary,archived:!!t.archived}));
+ const mine=t=>t.profile===profile,shown=t=>t.summary&&!t.deleted&&t.summary.ephemeral!==true&&!(t.emptyHistory===true&&!t.summary.name&&!t.summary.preview);
+ let data=Object.values(known).filter(t=>shown(t)&&(scope==='all'||(scope==='others'?!mine(t):mine(t)))).map(t=>({...t.summary,turns:Array.isArray(t.summary.turns)?t.summary.turns:[],archived:!!t.archived}));
  data=data.filter(t=>t.archived===!!params?.archived);
+ if(params?.parentThreadId)data=data.filter(t=>t.parentThreadId===params.parentThreadId);
+ if(params?.ancestorThreadId)data=data.filter(t=>descendsFrom(known,t.id,params.ancestorThreadId));
+ const kinds=Array.isArray(params?.sourceKinds)&&params.sourceKinds.length?new Set(params.sourceKinds):null;
+ if(kinds){const sub=[...kinds].some(k=>SUBAGENT_KINDS.has(k)),user=[...kinds].some(k=>!SUBAGENT_KINDS.has(k));data=data.filter(t=>t.threadSource==='subagent'?sub:t.threadSource==='thread_title'?false:user&&(!t.source||kinds.has(t.source)||kinds.has('unknown')));}
+ else if(!params?.parentThreadId&&!params?.ancestorThreadId)data=data.filter(t=>t.threadSource!=='subagent'&&t.threadSource!=='thread_title');
  if(params?.cwd)data=data.filter(t=>t.cwd===params.cwd||Array.isArray(params.cwd)&&params.cwd.includes(t.cwd));
  const term=(params?.searchTerm||'').toLocaleLowerCase();
  if(term)data=data.filter(t=>[t.name,t.preview].some(v=>v?.toLocaleLowerCase().includes(term)));
@@ -122,4 +134,4 @@ class NativeEventStreams {
  }
 }
 
-module.exports={collections,reads,threadScoped,ownedPage,cachedPage,cachedAll,NativeEventStreams};
+module.exports={collections,reads,threadScoped,ownedPage,cachedPage,cachedAll,generalListing,NativeEventStreams};
