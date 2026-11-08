@@ -81,8 +81,9 @@ async function launch({settings={},profiles=[{name:'loopback'}],label='isolated'
  }
  fs.writeFileSync(path.join(support,'profiles.json'),JSON.stringify(list),{mode:0o600});
  fs.writeFileSync(path.join(support,'opencodex.json'),JSON.stringify({mode:'ssh',sshAgent:'codex',profileName:profiles[0].name,profileId:profiles[0].id,cwd:project,permissionMode:'full',approvalsReviewer:'user',fullAccess:true,maxParallelSessions:3,parallelPrewarm:false,...settings,codexConnections:connections}),{mode:0o600});
- const openArgs=['-g','-n','-a',app,'--env','HOME='+home,'--env','CFFIXED_USER_HOME='+home,'--env','OPENCODEX_TEST_NO_PEERS=1','--args','--opencodex-test','--remote-debugging-port=9325','--use-mock-keychain'];
- const spawnApp=()=>execFileSync('/usr/bin/open',openArgs);spawnApp();
+ let debugPort=9325;
+ const openArgs=()=>['-g','-n','-a',app,'--env','HOME='+home,'--env','CFFIXED_USER_HOME='+home,'--env','OPENCODEX_TEST_NO_PEERS=1','--args','--opencodex-test','--remote-debugging-port='+debugPort,'--use-mock-keychain'];
+ const spawnApp=()=>execFileSync('/usr/bin/open',openArgs());spawnApp();
  const endpoint=path.join(support,'test-endpoint.json');
  let info=await until(()=>{try{return JSON.parse(fs.readFileSync(endpoint,'utf8'));}catch{return null;}},'test endpoint');
  const events=()=>{try{return fs.readFileSync(path.join(support,'adapter-events.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));}catch{return [];}};
@@ -98,7 +99,8 @@ async function launch({settings={},profiles=[{name:'loopback'}],label='isolated'
  const release=(marker,text='RELEASED-'+marker)=>{const h=held.get(marker);if(!h)throw Error('nothing held for '+marker);held.delete(marker);send(h.res,h.input,final(text));};
  async function pages(){
   const out=[];
-  for(const target of (await (await fetch('http://127.0.0.1:9325/json/list')).json()).filter(t=>t.url.startsWith('app://-/index.html'))){
+  const list=await until(async()=>{try{return await (await fetch('http://127.0.0.1:'+debugPort+'/json/list')).json();}catch{return null;}},'devtools endpoint',30000);
+  for(const target of list.filter(t=>t.url.startsWith('app://-/index.html'))){
    const page=await socket(target.webSocketDebuggerUrl);
    const run=async(expression,timeout=30000)=>{const r=await page.call('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true},timeout);if(r.exceptionDetails)throw Error(r.exceptionDetails.exception?.description||r.exceptionDetails.text);return r.result.value;};
    out.push({page,run,info:await run('({href:location.href,text:document.body.innerText.length})')});
@@ -117,6 +119,7 @@ async function launch({settings={},profiles=[{name:'loopback'}],label='isolated'
   if(offline){const saved=JSON.parse(fs.readFileSync(path.join(support,'profiles.json'),'utf8'));for(const p of saved)p.port=1;fs.writeFileSync(path.join(support,'profiles.json'),JSON.stringify(saved),{mode:0o600});}
   fs.rmSync(endpoint,{force:true});
   const mark=events().length;
+  debugPort+=1;
   spawnApp();
   info=await until(()=>{try{return JSON.parse(fs.readFileSync(endpoint,'utf8'));}catch{return null;}},'test endpoint after restart');
   const fresh=()=>events().slice(mark);

@@ -39,7 +39,8 @@ const report={version:'0.4.15',at:new Date().toISOString(),checks:{},errors:[]};
   assert.equal((await h.client.call('thread/resume',{threadId:A})).thread.id,A);
   report.checks.offlineRequestsAnswerFromCache=true;
 
-  const pages=await h.pages();view=pages.find(p=>p.info.href==='app://-/index.html')||pages[0];
+  // The window finishes loading a moment after the offline restart; wait for the main page.
+  view=await h.until(async()=>{const pages=await h.pages().catch(()=>[]);const main=pages.find(p=>p.info.href==='app://-/index.html');for(const p of pages)if(p!==main)try{p.page.close();}catch{}return main||null;},'main window after restart',45000);
   const row=`[...document.querySelectorAll('a,button,[role=button],[role=link],[role=option],li,div,span')].filter(e=>e.innerText?.trim().startsWith(${JSON.stringify(ROW)})).filter(e=>{const r=e.getBoundingClientRect();return e.offsetParent&&r.width>0&&r.height>0;}).sort((a,b)=>{const ra=a.getBoundingClientRect(),rb=b.getBoundingClientRect();return ra.width*ra.height-rb.width*rb.height;})[0]`;
   await h.until(()=>view.run(`(()=>{const r=${row};if(!r)return false;r.click();return true;})()`),'sidebar row offline',60000);
   const shown=await h.until(async()=>{const t=await view.run('document.body.innerText');return t.includes(ROW+' second message')&&t.includes('DONE')?t:null;},'conversation text offline',30000);
