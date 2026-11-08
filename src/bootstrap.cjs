@@ -2,7 +2,7 @@
 const Module=require('node:module'),nativeLoad=Module._load;
 const safeStorage=require('./safe-storage.cjs');
 Module._load=function(name,...args){const result=nativeLoad.call(this,name,...args);return name==='electron'?new Proxy(result,{get(target,key){return key==='safeStorage'?safeStorage:Reflect.get(target,key);}}):result;};
-const {app,ipcMain,BrowserWindow,Menu,dialog}=require('electron');
+const {app,ipcMain,BrowserWindow,Menu,dialog,shell}=require('electron');
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),crypto=require('node:crypto'),cp=require('node:child_process'),EventEmitter=require('node:events');
 const openCodexVersion=require('../package.json').openCodexVersion;
 const root=path.join(app.getPath('appData'),'OpenCodex');
@@ -47,6 +47,8 @@ const {validateProfile,validateCwd}=require('./ssh-profiles.cjs');
 // Parallel conversations: extra runtimes to the same host; see native-sessions.cjs.
 const sessions=new (require('./native-sessions.cjs').SessionPool)({primary:()=>runtime,limit:()=>Math.max(0,Math.min(16,Number(settings.maxParallelSessions)||4)-1),spawn:()=>openWorker(),release:(owner,id)=>releaseThread(owner,id),audit:(type,data)=>audit(type,data)});
 const anyRun=()=>sessions.live().some(r=>r.run||r.openCodexPreparing);
+// The conversation most recently opened in a window: the default target of 匯出對話.
+let lastViewed=null;
 const threadBusy=id=>sessions.live().some(r=>r.run?.threadId===id||r.openCodexPreparing?.threadId===id)||!!handoff?.running(id)||nativeShell.active?.remoteThreadId===id;
 const handoffBusyFor=id=>{if(!handoff||isClaude())return false;const model=handoff.snapshot(id).model,h=handoff.isModel(model)?handoff.owner(model):null;return !!h?.busy;};
 // A collaborator that drops unexpectedly reconnects in the background with bounded backoff.
@@ -105,7 +107,7 @@ cp.execFile(path.join(process.resourcesPath,'codex-cli/CodexCLI.app/Contents/Mac
  void app.whenReady().then(()=>{dialog.showErrorBox('OpenCodex 內附的 Codex 引擎被 macOS 阻擋','App 內的檔案被修改過，簽章已失效，所以 macOS 拒絕執行內附引擎。這不是網路或組織設定問題。請重新安裝 OpenCodex。');app.exit(1);});
 });
 const {connectionState}=require('./native-connection.cjs');
-function publicState(){const grants=approvalGrants.list();return {composio:bridge?.composio.state()||null,quotas:providerQuotas(),peerBusy:!!(handoff?.primary?.busy||agents?.active),agents:agents?.state()||null,handoff:!isClaude()&&handoff?{connected:handoff.connected,defaultEngine:pendingDefault||handoff.defaultEngine,configured:!!(settings.peerProfileId||settings.profileId),pending:!!pendingDefault}:null,fullAccess:settings.fullAccess===true,permissionBusy:!!agents?.active||!!handoff?.busy||permissionChanging||anyRun()||localTurns.size>0||!!nativeShell.active||!!nativeQueue.starting,parallelSessions:sessions.state(),approvalGrants:grants,codexConnections:settings.codexConnections||{},claudeConnections:settings.claudeConnections||{},approvalError:approvalGrants.error,mode:settings.mode,sshAgent:settings.sshAgent,profile:runtime?.snapshot?.hostName||settings.profileName,transport:runtime?.snapshot?.transport||null,cwd:runtime?.localCwd||settings.cwd,...connectionState(runtime),error:bridgeError||null,version:openCodexVersion,quota:quotaMonitor.snapshot(),connecting,peerConnecting:connecting&&connectingPeer,hostConfirmation,profileId:runtime?.snapshot?.profileId||settings.profileId||null,permissionMode:runtime?.permissionMode||settings.permissionMode,guardianAvailable:guardianRuntime.capable(runtime),runtimeVersion:runtime?.snapshot?.runtimeVersion||null,engine:'opencodex-direct-ssh',agentBridgeAppLoaded:Object.keys(require.cache).some(k=>k===path.join(abRoot,'dist-main/main.js')),...(isClaude()&&claude?{...claude.state(),permissionBusy:!!agents?.active||permissionChanging||claude.busy||claude.queue.starting}: {})};}
+function publicState(){const grants=approvalGrants.list();return {composio:bridge?.composio.state()||null,quotas:providerQuotas(),peerBusy:!!(handoff?.primary?.busy||agents?.active),agents:agents?.state()||null,handoff:!isClaude()&&handoff?{connected:handoff.connected,defaultEngine:pendingDefault||handoff.defaultEngine,configured:!!(settings.peerProfileId||settings.profileId),pending:!!pendingDefault}:null,fullAccess:settings.fullAccess===true,permissionBusy:!!agents?.active||!!handoff?.busy||permissionChanging||anyRun()||localTurns.size>0||!!nativeShell.active||!!nativeQueue.starting,parallelSessions:sessions.state(),lastThread:lastViewed&&known[lastViewed.id]&&!known[lastViewed.id].deleted?{id:lastViewed.id,name:known[lastViewed.id].summary?.name||null}:null,approvalGrants:grants,codexConnections:settings.codexConnections||{},claudeConnections:settings.claudeConnections||{},approvalError:approvalGrants.error,mode:settings.mode,sshAgent:settings.sshAgent,profile:runtime?.snapshot?.hostName||settings.profileName,transport:runtime?.snapshot?.transport||null,cwd:runtime?.localCwd||settings.cwd,...connectionState(runtime),error:bridgeError||null,version:openCodexVersion,quota:quotaMonitor.snapshot(),connecting,peerConnecting:connecting&&connectingPeer,hostConfirmation,profileId:runtime?.snapshot?.profileId||settings.profileId||null,permissionMode:runtime?.permissionMode||settings.permissionMode,guardianAvailable:guardianRuntime.capable(runtime),runtimeVersion:runtime?.snapshot?.runtimeVersion||null,engine:'opencodex-direct-ssh',agentBridgeAppLoaded:Object.keys(require.cache).some(k=>k===path.join(abRoot,'dist-main/main.js')),...(isClaude()&&claude?{...claude.state(),permissionBusy:!!agents?.active||permissionChanging||claude.busy||claude.queue.starting}: {})};}
 const {rateLimitSummary}=require(path.join(abRoot,'dist-main/runtime-usage.js'));
 const quotaMonitor=require('./quota.cjs')({normalize:rateLimitSummary,publish,getSource:()=>isRemote()?(runtime&&!runtime.closed?{key:runtime.id,rpc:runtime.rpc,label:(runtime.snapshot.transport==='https-relay'?'HTTPS/WSS Runtime · ':'SSH Runtime · ')+runtime.snapshot.hostName}:null):(localRpc&&!localRpc.isClosed?{key:settings.mode,rpc:localRpc,label:settings.mode==='official'?'本機官方登入':'自訂 API'}:null)});
 function providerQuotas(){
@@ -271,7 +273,7 @@ function attach(value,{worker=false}={}){
   remoteThreadCache.set(thread.id,{thread:{...summary,turns}},attached.snapshot.profileId,{complete:true});
   fs.writeFileSync(knownFile,JSON.stringify(known),{mode:0o600});
  };
- const notifyRemote=m=>{if(eventStreams.notification(attached,m))return;if(!current()||!isRemote())return;if(m.method==='thread/closed'&&sessions.migrating.get(m.params?.threadId)===attached){sessions.migrating.delete(m.params.threadId);return;}if(m.method==='turn/started'||m.method==='turn/completed')setImmediate(publish);if(m.method==='turn/started'&&known[m.params.threadId]){known[m.params.threadId].emptyHistory=false;fs.writeFileSync(knownFile,JSON.stringify(known),{mode:0o600});}if(!m.method.startsWith('account/')&&m.method!=='thread/queue/changed'){if(m.method==='thread/settings/updated'){const choice=pendingPermissions.get(attached)?.get(m.params?.threadId)||nativePolicy.resolveSelection({},known[m.params?.threadId],settings);m={...m,params:nativePolicy.localSnapshot(m.params,choice,known[m.params?.threadId]?.localCwd||attached.localCwd,permissionSnapshot(attached,choice,known[m.params?.threadId]?.localCwd||attached.localCwd,m.params?.threadId))};if(handoff&&!isClaude())m=handoff.settings(m);}const mapped=organization.projectNotification(attached.snapshot.profileId,m.params?.thread?{...m,params:{...m.params,thread:workspace.localThread(m.params.thread,known,m.method==='thread/started'?attached.localCwd:undefined)}}:m);for(const ws of clients)send(ws,mapped);}if(m.method==='turn/completed'){void refreshHistory(attached,m.params.threadId);nativeQueue.completed(attached.snapshot.profileId,m.params.threadId,m.params.turn.status);}if(m.method==='account/updated')quotaMonitor.invalidate();else if(m.method==='account/rateLimits/updated'||m.method==='turn/completed')quotaMonitor.refresh();};
+ const notifyRemote=m=>{if(m.method==='turn/completed'&&m.params?.threadId)historySync.touch(m.params.threadId,m.params.turn?.id);if(eventStreams.notification(attached,m))return;if(!current()||!isRemote())return;if(m.method==='thread/closed'&&sessions.migrating.get(m.params?.threadId)===attached){sessions.migrating.delete(m.params.threadId);return;}if(m.method==='turn/started'||m.method==='turn/completed')setImmediate(publish);if(m.method==='turn/started'&&known[m.params.threadId]){known[m.params.threadId].emptyHistory=false;fs.writeFileSync(knownFile,JSON.stringify(known),{mode:0o600});}if(!m.method.startsWith('account/')&&m.method!=='thread/queue/changed'){if(m.method==='thread/settings/updated'){const choice=pendingPermissions.get(attached)?.get(m.params?.threadId)||nativePolicy.resolveSelection({},known[m.params?.threadId],settings);m={...m,params:nativePolicy.localSnapshot(m.params,choice,known[m.params?.threadId]?.localCwd||attached.localCwd,permissionSnapshot(attached,choice,known[m.params?.threadId]?.localCwd||attached.localCwd,m.params?.threadId))};if(handoff&&!isClaude())m=handoff.settings(m);}const mapped=organization.projectNotification(attached.snapshot.profileId,m.params?.thread?{...m,params:{...m.params,thread:workspace.localThread(m.params.thread,known,m.method==='thread/started'?attached.localCwd:undefined)}}:m);for(const ws of clients)send(ws,mapped);}if(m.method==='turn/completed'){void refreshHistory(attached,m.params.threadId);nativeQueue.completed(attached.snapshot.profileId,m.params.threadId,m.params.turn.status);}if(m.method==='account/updated')quotaMonitor.invalidate();else if(m.method==='account/rateLimits/updated'||m.method==='turn/completed')quotaMonitor.refresh();};
  attached.openCodexHooksNotification=notifyRemote;
  attached.openCodexHooksError=error=>{if(!current()||attached.closed)return;bridgeError='Mac Hooks：'+error.message;audit('hooks-error',{message:error.message});publish();};
  const serverTurn=backend.openCodexWatchServerTurns?.(attached,bridge.runtimeDependencies,{
@@ -326,6 +328,7 @@ async function closeWorkers(){
 // workers that idled for a while; their conversations reopen on the next request.
 async function maintainSessions(){
  if(shuttingDown||connecting||permissionChanging||hostConfirmation||!isRemote()||isClaude()||!runtime||runtime.closed||!lastConnectionParams||!clients.size)return;
+ void syncHistory();
  const now=Date.now(),spare=settings.parallelPrewarm===false?0:1,idle=sessions.idleWorkers().sort((a,b)=>(a.openCodexLastActivity||0)-(b.openCodexLastActivity||0));
  for(const w of idle.slice(0,Math.max(0,idle.length-spare)))if(now-(w.openCodexLastActivity||0)>600000){sessions.forget(w);await handlers.get('runtime:disconnect')({},w.id).catch(error=>audit('session-worker-close-failed',{runtimeId:w.id,message:error.message}));}
  // A worker that is only loading a conversation still counts as the spare.
@@ -395,6 +398,7 @@ function runtimeEvent(event,payload){
   respond:decision=>{audit('tool-approval-result',{decision});return handlers.get('runtime:respond')({},{runtimeId:owner.id,approvalId:payload.approvalId,decision});}});
 }
 async function request(ws,method,params,fromQueue=false){
+ if(method==='thread/resume'&&params?.threadId&&!fromQueue&&clients.has(ws))lastViewed={id:params.threadId};
  if(!isRemote()){const init=await readyLocal();return method==='initialize'?init:localRequest(method,params,120000);}
  if(method==='initialize')return readyLocal();
  if(method==='mcpServer/event/stream/stop')return eventStreams.stop(ws,params?.subscriptionId);
@@ -477,14 +481,21 @@ async function request(ws,method,params,fromQueue=false){
   if(method==='account/rateLimits/read')return {rateLimits:null,rateLimitsByLimitId:null};
   // Offline, every host's cached conversation stays in the sidebar and opens from the cache.
   if(method==='thread/list'||method==='thread/search')return organization.listPage(profileId,method,params||{},query=>routing.cachedPage(method,query,known,profileId,{scope:'all'}),{foreign:true});
-  if(method==='thread/attachmentOwner/list')return {data:[],nextCursor:null};
+  if(method==='thread/attachmentOwner/list'||method==='thread/attachment/list')return {data:[],nextCursor:null};
   if(method==='thread/loaded/list'||method==='mcpServerStatus/list')return {data:[],nextCursor:null};
-  if(known[params?.threadId]?.profile===profileId&&!known[params.threadId]?.deleted&&remoteThreadCache.has(params.threadId,profileId)){
-   const cached=remoteThreadCache.get(params.threadId,profileId);
+  // Opening a conversation also asks for its goal, timeline and other per-thread state. Offline
+  // (or while SSH is still connecting) those answer empty instead of failing the whole view.
+  if(method==='thread/goal/get')return {goal:null};
+  if(method==='thread/timeline/list')return {data:[],nextCursor:null,activeRealtimeSessionAtPageStart:null};
+  // Any cached conversation opens from the cache, whichever host it belongs to.
+  const cachedProfile=known[params?.threadId]?.profile;
+  if(cachedProfile&&!known[params.threadId]?.deleted&&remoteThreadCache.has(params.threadId,cachedProfile)){
+   const cached=remoteThreadCache.get(params.threadId,cachedProfile);
    cached.thread=nativeShell.merge(cached.thread);
    if(['thread/turns/list','thread/items/list'].includes(method))return nativeShell.listCached(method,params,cached.thread,{complete:cached.openCodexHistoryComplete===true});
-   if(method==='thread/read'||method==='thread/resume')return organization.projectResult(profileId,nativePolicy.localSnapshot(cached,nativePolicy.resolveSelection({},known[params.threadId],settings),known[params.threadId]?.localCwd,known[params.threadId]?.permissionSnapshot));
+   if(method==='thread/read'||method==='thread/resume')return organization.projectResult(cachedProfile,nativePolicy.localSnapshot(cached,nativePolicy.resolveSelection({},known[params.threadId],settings),known[params.threadId]?.localCwd,known[params.threadId]?.permissionSnapshot));
   }
+  if(/^thread\/.+\/list$/.test(method)&&params?.threadId)return {data:[],nextCursor:null};
   if(routing.threadScoped(method,params)||method.startsWith('thread/')||method.startsWith('turn/'))throw Error(bridgeError||'SSH 尚未連線；請開啟側邊欄 SSH 連線。');
  }
  // The native UI asks for MCP status while opening a conversation, before thread/resume has
@@ -658,7 +669,7 @@ async function request(ws,method,params,fromQueue=false){
   if(method==='thread/start'&&handoff)Object.assign(result,handoff.started(startModel,result));
   if(explicitPermission&&settings.permissionMode!==selection.requested){settings.permissionMode=selection.requested;save();}
   if(explicitReviewer&&settings.approvalsReviewer!==selection.reviewer){settings.approvalsReviewer=selection.reviewer;save();}
-  if(result.thread?.id){result.thread=organization.captureThread(profileId,method,params,workspace.localThread(result.thread,known,selectedCwd));if(['thread/read','thread/resume'].includes(method)||(method==='thread/fork'&&!params.excludeTurns))result.thread=nativeShell.merge(result.thread);const {turns,...summary}=result.thread;known[result.thread.id]={...known[result.thread.id],emptyHistory:method==='thread/start'?true:turns?.length?false:known[result.thread.id]?.emptyHistory,profile:requestOwner.snapshot.profileId,localCwd:selectedCwd||known[result.thread.id]?.localCwd,permissionMode:selectedCwd?selection.requested:known[result.thread.id]?.permissionMode,approvalsReviewer:selectedCwd?selection.reviewer:known[result.thread.id]?.approvalsReviewer,permissionSnapshot:verifiedPermission||known[result.thread.id]?.permissionSnapshot,environmentId:requestOwner.executor?.environmentId,summary};remoteThreadCache.set(result.thread.id,result,requestOwner.snapshot.profileId,require('./native-history.cjs').snapshotOptions(method,params));fs.writeFileSync(knownFile,JSON.stringify(known),{mode:0o600});}
+  if(result.thread?.id){if(['thread/start','thread/fork'].includes(method)&&!fromQueue)lastViewed={id:result.thread.id};result.thread=organization.captureThread(profileId,method,params,workspace.localThread(result.thread,known,selectedCwd));if(['thread/read','thread/resume'].includes(method)||(method==='thread/fork'&&!params.excludeTurns))result.thread=nativeShell.merge(result.thread);const {turns,...summary}=result.thread;known[result.thread.id]={...known[result.thread.id],emptyHistory:method==='thread/start'?true:turns?.length?false:known[result.thread.id]?.emptyHistory,profile:requestOwner.snapshot.profileId,localCwd:selectedCwd||known[result.thread.id]?.localCwd,permissionMode:selectedCwd?selection.requested:known[result.thread.id]?.permissionMode,approvalsReviewer:selectedCwd?selection.reviewer:known[result.thread.id]?.approvalsReviewer,permissionSnapshot:verifiedPermission||known[result.thread.id]?.permissionSnapshot,environmentId:requestOwner.executor?.environmentId,summary};remoteThreadCache.set(result.thread.id,result,requestOwner.snapshot.profileId,require('./native-history.cjs').snapshotOptions(method,params));fs.writeFileSync(knownFile,JSON.stringify(known),{mode:0o600});}
   const entry=known[params?.threadId];
   if(entry){
    if(selectedCwd){entry.localCwd=selectedCwd;if(entry.summary)entry.summary.cwd=selectedCwd;}if(selectedCwd||explicitPermission)entry.permissionMode=selection.requested;
@@ -690,6 +701,60 @@ async function request(ws,method,params,fromQueue=false){
 function openManager(){for(const w of BrowserWindow.getAllWindows())if(w.webContents.getURL().startsWith('app://')){w.show();w.focus();w.webContents.send('opencodex:open-connections');}}
 const showControls=openManager;
 ipcMain.on('opencodex:initial-state',event=>{event.returnValue=publicState();});
+// --- Conversation history: keep the offline cache warm and export Markdown ---
+// Every conversation of the connected host is read once (and again after each turn) into
+// native-history, so it stays readable with no SSH connection and is never locked in the App.
+const historySync={pending:new Map(),failures:new Map(),running:false,touch(id,turnId){this.pending.set(id,turnId||null);setTimeout(()=>void syncHistory(),1500);}};
+function needsRefresh(id){
+ const e=known[id];if(!e||e.deleted||!e.profile||e.summary?.ephemeral===true||e.emptyHistory===true)return false;
+ const cached=remoteThreadCache.get(id,e.profile);
+ if(!cached?.thread||cached.openCodexHistoryComplete!==true)return true;
+ return Number(e.summary?.updatedAt||0)>Number(cached.thread.updatedAt||0);
+}
+async function syncHistory(limit=8){
+ if(historySync.running||shuttingDown||connecting||!isRemote()||isClaude()||!runtime||runtime.closed||!clients.size)return;
+ const profile=runtime.snapshot?.profileId;if(!profile)return;
+ // A finished turn only forces a re-read when the live mirror missed it (the cache lacks that turn).
+ const stale=id=>{if(!historySync.pending.has(id))return false;const want=historySync.pending.get(id);if(want===null)return true;const cached=remoteThreadCache.get(id,known[id]?.profile);return !(cached?.thread?.turns||[]).some(t=>t.id===want);};
+ const ids=[];
+ for(const id of new Set([...historySync.pending.keys(),...Object.keys(known)])){
+  if(known[id]?.profile!==profile||known[id].deleted||(historySync.failures.get(id)||0)>=3){historySync.pending.delete(id);continue;}
+  if(threadBusy(id))continue;
+  if(stale(id)||needsRefresh(id))ids.push(id);else historySync.pending.delete(id);
+ }
+ if(!ids.length)return;
+ historySync.running=true;
+ try{
+  for(const id of ids.slice(0,limit)){
+   historySync.pending.delete(id);
+   const ws=[...clients][0];if(!ws||!runtime||runtime.closed)break;
+   try{await request(ws,'thread/read',{threadId:id,includeTurns:true},true);historySync.failures.delete(id);audit('history-synced',{threadId:id});}
+   catch(error){historySync.failures.set(id,(historySync.failures.get(id)||0)+1);audit('history-sync-failed',{threadId:id,message:error.message});}
+  }
+ }finally{historySync.running=false;}
+ if(ids.length>limit)setTimeout(()=>void syncHistory(limit),500);
+}
+handle('opencodex:export-thread',async(_e,input={})=>{
+ const {writeMarkdown}=require('./native-export.cjs');
+ const dir=path.join(app.getPath('downloads'),'OpenCodex 對話匯出');
+ let names={};try{names=Object.fromEntries(JSON.parse(fs.readFileSync(path.join(root,'profiles.json'),'utf8')).map(p=>[p.id,p.name]));}catch{/* no saved hosts yet */}
+ const ids=input.all?Object.keys(known).filter(id=>known[id].profile&&!known[id].deleted&&known[id].summary&&known[id].summary.ephemeral!==true&&known[id].emptyHistory!==true):[input.threadId||lastViewed?.id].filter(Boolean);
+ if(!ids.length)throw Error('請先開啟一個對話，再匯出。');
+ const files=[];let skipped=0;
+ for(const id of ids){
+  const profile=known[id]?.profile;if(!profile){skipped++;continue;}
+  let result=null;
+  // A fresh read when this host is connected and the cache is behind; otherwise the offline cache.
+  const live=runtime&&!runtime.closed&&runtime.snapshot?.profileId===profile&&clients.size>0&&!threadBusy(id);
+  if(live&&(!input.all||needsRefresh(id))){try{result=await request([...clients][0],'thread/read',{threadId:id,includeTurns:true},true);}catch(error){audit('export-read-failed',{threadId:id,message:error.message});}}
+  if(!result?.thread)result=remoteThreadCache.get(id,profile);
+  if(!result?.thread){skipped++;continue;}
+  files.push(writeMarkdown(dir,result.thread,{host:names[profile]||''}));
+ }
+ audit('export-thread',{count:files.length,skipped,all:!!input.all});
+ if(files.length)shell.showItemInFolder(files[0]);
+ return {dir,files,skipped};
+});
 handle('opencodex:status',()=>publicState());
 handle('opencodex:approval-revoke',(event,id)=>{
  if(!event.senderFrame||event.senderFrame!==event.sender.mainFrame||event.senderFrame.url!=='app://-/index.html')throw Error('權限管理僅限 OpenCodex 主視窗。');

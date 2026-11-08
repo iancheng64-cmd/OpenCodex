@@ -81,14 +81,15 @@ async function launch({settings={},profiles=[{name:'loopback'}],label='isolated'
  }
  fs.writeFileSync(path.join(support,'profiles.json'),JSON.stringify(list),{mode:0o600});
  fs.writeFileSync(path.join(support,'opencodex.json'),JSON.stringify({mode:'ssh',sshAgent:'codex',profileName:profiles[0].name,profileId:profiles[0].id,cwd:project,permissionMode:'full',approvalsReviewer:'user',fullAccess:true,maxParallelSessions:3,parallelPrewarm:false,...settings,codexConnections:connections}),{mode:0o600});
- execFileSync('/usr/bin/open',['-g','-n','-a',app,'--env','HOME='+home,'--env','CFFIXED_USER_HOME='+home,'--env','OPENCODEX_TEST_NO_PEERS=1','--args','--opencodex-test','--remote-debugging-port=9325','--use-mock-keychain']);
+ const openArgs=['-g','-n','-a',app,'--env','HOME='+home,'--env','CFFIXED_USER_HOME='+home,'--env','OPENCODEX_TEST_NO_PEERS=1','--args','--opencodex-test','--remote-debugging-port=9325','--use-mock-keychain'];
+ const spawnApp=()=>execFileSync('/usr/bin/open',openArgs);spawnApp();
  const endpoint=path.join(support,'test-endpoint.json');
- const info=await until(()=>{try{return JSON.parse(fs.readFileSync(endpoint,'utf8'));}catch{return null;}},'test endpoint');
+ let info=await until(()=>{try{return JSON.parse(fs.readFileSync(endpoint,'utf8'));}catch{return null;}},'test endpoint');
  const events=()=>{try{return fs.readFileSync(path.join(support,'adapter-events.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line));}catch{return [];}};
  const seen=type=>events().some(event=>event.type===type);
  await until(()=>seen('shell-ready'),'shell ready');
  await until(()=>{const failed=events().find(e=>e.type==='ssh-autoconnect-failed');if(failed)throw Error('SSH loopback did not connect; see adapter-events.jsonl');return seen('ssh-connected');},'loopback SSH',90000);
- const {socket}=require('./qa-client.cjs');const client=await socket(info.url);
+ const {socket}=require('./qa-client.cjs');let client=await socket(info.url);
  await client.call('initialize',{clientInfo:{name:label,version:'1'}});
  const lastWrite=()=>Math.max(0,...events().filter(e=>['plugin/install','config/batchWrite'].includes(e.method)).map(e=>Date.parse(e.at)));
  const startedAt=Date.now();
@@ -104,6 +105,27 @@ async function launch({settings={},profiles=[{name:'loopback'}],label='isolated'
   }
   out.sort((a,b)=>b.info.text-a.info.text);return out;
  }
+ // Relaunch the same isolated home. offline:true points every saved host at a closed port, so the
+ // App starts with no SSH connection and must work from its local history cache.
+ async function restart({offline=false,mutate=null}={}){
+  try{client.close();}catch{}
+  const pid=info.pid;try{process.kill(pid,'SIGTERM');}catch{}
+  await until(()=>{try{process.kill(pid,0);return false;}catch{return true;}},'app exit',20000).catch(()=>{try{process.kill(pid,'SIGKILL');}catch{}});
+  for(const p of enginePids()){try{process.kill(p,'SIGKILL');}catch{}}
+  fs.rmSync(path.join(home,'engines.pid'),{force:true});
+  if(mutate)await mutate({support,home});
+  if(offline){const saved=JSON.parse(fs.readFileSync(path.join(support,'profiles.json'),'utf8'));for(const p of saved)p.port=1;fs.writeFileSync(path.join(support,'profiles.json'),JSON.stringify(saved),{mode:0o600});}
+  fs.rmSync(endpoint,{force:true});
+  const mark=events().length;
+  spawnApp();
+  info=await until(()=>{try{return JSON.parse(fs.readFileSync(endpoint,'utf8'));}catch{return null;}},'test endpoint after restart');
+  const fresh=()=>events().slice(mark);
+  await until(()=>fresh().some(e=>e.type==='shell-ready'),'shell ready after restart');
+  if(offline)await until(()=>fresh().some(e=>e.type==='ssh-autoconnect-failed'||(e.type==='ssh-autoconnect-finished'&&e.connected===false)),'offline start',60000);
+  else await until(()=>fresh().some(e=>e.type==='ssh-connected'),'ssh after restart',90000);
+  client=await socket(info.url);await client.call('initialize',{clientInfo:{name:label,version:'1'}});
+  return info;
+ }
  async function stop(){
   for(const h of held.values())h.res.destroy();held.clear();
   try{client.close();}catch{}
@@ -114,6 +136,6 @@ async function launch({settings={},profiles=[{name:'loopback'}],label='isolated'
   model.closeAllConnections();await new Promise(r=>model.close(r));
   fs.rmSync(home,{recursive:true,force:true,maxRetries:4,retryDelay:200});
  }
- return {home,support,project,profiles,client,events,seen,records,held,release,enginePids,pages,stop,until,pause,MARKER,text:value=>[{type:'text',text:value,text_elements:[]}],mainPid:info.pid};
+ return {home,support,project,profiles,get client(){return client;},events,seen,records,held,release,enginePids,pages,restart,stop,until,pause,MARKER,text:value=>[{type:'text',text:value,text_elements:[]}],get mainPid(){return info.pid;}};
 }
 module.exports={launch,until,pause,MARKER};

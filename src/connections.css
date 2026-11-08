@@ -37,3 +37,5 @@
 .oc-composio-actions{justify-content:flex-start;margin-top:12px}
 @media(prefers-reduced-transparency:reduce){.oc-panel::backdrop{backdrop-filter:none;background:#0008}}
 @media(prefers-reduced-motion:reduce){.oc-panel *{animation:none!important;transition:none!important}}
+
+#opencodex-sidebar-quota .oc-export{justify-content:flex-start;gap:6px;margin-top:8px;flex-wrap:wrap}#opencodex-sidebar-quota .oc-export-note{margin-top:2px;overflow-wrap:anywhere}
